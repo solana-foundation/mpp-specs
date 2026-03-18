@@ -10,8 +10,13 @@ consensus: false
 
 author:
   - name: Ludo Galabru
-    ins: 
+    ins: L. Galabru
     email: ludo.galabru@solana.org
+    org: Solana Foundation
+
+  - name: Ilan Gitter
+    ins: I. Gitter
+    email: ilan.gitter@solana.org
     org: Solana Foundation
 
 normative:
@@ -107,16 +112,19 @@ it to the Solana network:
       |----------------------->  |                        |
       |                          |                        |
       |  (2) 402 Payment Required|                        |
-      |      (recipient, amount) |                        |
+      |      (recipient, amount, |                        |
+      |       feePayerKey?)      |                        |
       |<-----------------------  |                        |
       |                          |                        |
-      |  (3) Build & sign tx     |                        |
+      |  (3) Build tx, set fee   |                        |
+      |      payer, sign         |                        |
       |                          |                        |
       |  (4) Authorization:      |                        |
       |      Payment <credential>|                        |
       |      (signed tx bytes)   |                        |
       |----------------------->  |                        |
-      |                          |  (5) sendTransaction   |
+      |                          |  (5) Co-sign (if fee   |
+      |                          |      payer) + send     |
       |                          |----------------------> |
       |                          |  (6) Confirmation      |
       |                          |<---------------------- |
@@ -128,6 +136,9 @@ it to the Solana network:
 
 In this model the server controls transaction broadcast, enabling
 fee sponsorship ({{fee-sponsorship}}) and server-side retry logic.
+When `feePayer` is `true`, the challenge includes `feePayerKey`
+so the client sets the server as fee payer. The server co-signs
+with its fee payer key before broadcasting.
 
 ## Client-Broadcast Flow (Fallback) {#client-broadcast-flow}
 
@@ -286,7 +297,11 @@ recipient
 externalId
 : OPTIONAL. Merchant's reference (e.g., order ID, invoice
   number), per {{I-D.payment-intent-charge}}. May be used
-  for reconciliation or idempotency.
+  for reconciliation or idempotency. When present, clients
+  SHOULD include this value as a Memo Program instruction
+  in the transaction, making it visible on-chain for
+  auditing and reconciliation. Servers MAY verify the memo
+  matches the `externalId` from the challenge.
 
 ## Method Details
 
@@ -319,8 +334,13 @@ tokenProgram
   (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`) or
   the Token-2022 Program
   (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`).
-  Defaults to the Token Program if omitted. MUST NOT be
-  present when `splToken` is absent.
+  If omitted, clients MUST determine the correct token
+  program by fetching the mint account from the network
+  and inspecting its owner program. Servers SHOULD
+  include this field as a hint to avoid the extra RPC
+  lookup, but clients MUST NOT fail if the field is
+  absent — they MUST resolve it from the mint. MUST NOT
+  be present when `splToken` is absent.
 
 reference
 : REQUIRED. A server-generated unique identifier for this
@@ -341,6 +361,17 @@ feePayerKey
   `feePayer` is `true`; MUST be absent when `feePayer` is
   `false` or omitted. The client uses this key as the
   transaction fee payer when constructing the transaction.
+
+feePayerFee
+: OPTIONAL. An additional amount in base units that the
+  client MUST include as a separate transfer to the
+  `feePayerKey` address to compensate the server for
+  transaction fees. When present, the client MUST add
+  a native SOL transfer instruction for this amount
+  to the fee payer's account, in addition to the primary
+  payment transfer. This allows servers to recover the
+  cost of sponsoring transaction fees. MUST NOT be
+  present when `feePayer` is `false` or omitted.
 
 recentBlockhash
 : OPTIONAL. A base58-encoded recent blockhash for the
@@ -1096,7 +1127,22 @@ Mitigation Strategies
     verification (e.g., API keys, OAuth tokens) before
     accepting fee-sponsored transactions.
 
-Fee Token Exhaustion
+ATA Rent Drain
+: When the fee payer funds the creation of an Associated
+  Token Account (ATA) for the recipient, it pays
+  approximately 0.002 SOL in rent. The recipient can
+  close the ATA at any time to reclaim this rent, then
+  the next payment to the same recipient re-creates the
+  ATA at the fee payer's expense. A malicious or
+  opportunistic recipient can repeat this cycle to drain
+  the fee payer's SOL balance. Servers SHOULD verify via
+  RPC that the recipient's ATA already exists before
+  signing a fee-sponsored transaction that includes an
+  ATA creation instruction. Alternatively, servers MAY
+  require recipients to maintain their own ATAs, or
+  factor the ATA rent cost into the payment amount.
+
+Fee Payer Balance Exhaustion
 : Servers MUST monitor their fee payer account balance
   and reject new fee-sponsored requests when the balance
   is insufficient to cover transaction fees. The server
@@ -1141,8 +1187,6 @@ by {{I-D.httpauth-payment}}:
 | Method Identifier | Description | Reference |
 |-------------------|-------------|-----------|
 | `solana` | Solana blockchain native SOL and SPL token transfer | This document |
-
-Contact: MPP (<contact@mpp.dev>)
 
 ## Payment Intent Registration
 
