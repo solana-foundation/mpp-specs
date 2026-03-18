@@ -9,10 +9,10 @@ submissiontype: independent
 consensus: false
 
 author:
-  - name: Ludovic Music
-    ins: L. Music
-    email: ludovic@mpp.dev
-    org: MPP
+  - name: Ludo Galabru
+    ins: 
+    email: ludo.galabru@solana.org
+    org: Solana Foundation
 
 normative:
   RFC2119:
@@ -43,25 +43,25 @@ informative:
     target: https://solana.com/docs
     author:
       - org: Solana Foundation
-    date: 2024
+    date: 2026
   SPL-TOKEN:
     title: "SPL Token Program"
-    target: https://spl.solana.com/token
+    target: https://solana.com/docs/tokens
     author:
       - org: Solana Foundation
-    date: 2024
+    date: 2026
   SPL-TOKEN-2022:
     title: "SPL Token-2022 Program"
-    target: https://spl.solana.com/token-2022
+    target: https://solana.com/docs/tokens/extensions 
     author:
       - org: Solana Foundation
-    date: 2024
+    date: 2026
   BASE58:
     title: "Base58 Encoding Scheme"
     target: https://datatracker.ietf.org/doc/html/draft-msporny-base58-03
     author:
       - name: Manu Sporny
-    date: 2023
+    date: 2026
 ---
 
 --- abstract
@@ -341,6 +341,15 @@ feePayerKey
   `feePayer` is `true`; MUST be absent when `feePayer` is
   `false` or omitted. The client uses this key as the
   transaction fee payer when constructing the transaction.
+
+recentBlockhash
+: OPTIONAL. A base58-encoded recent blockhash for the
+  client to use when constructing the transaction. When
+  provided, clients SHOULD use this blockhash instead of
+  fetching one from an RPC node. This avoids an extra
+  RPC round-trip and ensures the server can verify
+  blockhash freshness. If omitted, clients MUST fetch
+  a recent blockhash themselves.
 
 ### Native SOL Example
 
@@ -1094,6 +1103,20 @@ Fee Token Exhaustion
   SHOULD return a standard 402 response with a fresh
   challenge that has `feePayer` set to `false`, allowing
   the client to pay its own fees as a fallback.
+
+## Transaction Simulation
+
+For `type="transaction"` credentials, servers SHOULD simulate
+the transaction using the `simulateTransaction` RPC method
+before broadcasting. Simulation detects failures such as
+insufficient funds, invalid instructions, or exceeded compute
+limits without consuming fees or landing a failed transaction
+on-chain. This is especially important when the server acts
+as fee payer ({{fee-sponsorship}}), as a failed broadcast
+wastes the fee payer's SOL.
+
+Servers MUST reject the credential if simulation indicates
+an error, returning a fresh 402 challenge.
 
 ## Transaction Payload Security
 
