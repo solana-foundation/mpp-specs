@@ -99,11 +99,11 @@ Token-2022 {{SPL-TOKEN-2022}}), making it suitable for
 micropayment use cases where fast confirmation and low overhead
 are important.
 
-## Server-Broadcast Flow (Default)
+## Pull Mode (Default) {#pull-mode}
 
-The default flow uses `type="transaction"` credentials. The client
-signs the transaction and sends it to the server, which broadcasts
-it to the Solana network:
+The default flow, called "pull mode", uses `type="transaction"`
+credentials. The client signs the transaction and the server
+"pulls" it for broadcast to the Solana network:
 
 ~~~
    Client                     Server              Solana Network
@@ -140,9 +140,11 @@ When `feePayer` is `true`, the challenge includes `feePayerKey`
 so the client sets the server as fee payer. The server co-signs
 with its fee payer key before broadcasting.
 
-## Client-Broadcast Flow (Fallback) {#client-broadcast-flow}
+## Push Mode (Fallback) {#push-mode}
 
-The fallback flow uses `type="signature"` credentials. The client
+The fallback flow, called "push mode", uses `type="signature"`
+credentials. The client "pushes" the transaction to the network
+itself and presents the confirmed signature. The client
 broadcasts the transaction itself and presents the confirmed
 transaction signature:
 
@@ -226,6 +228,20 @@ Fee Payer
   acts as fee payer, it adds its signature to the transaction
   before broadcasting, covering the transaction fee on behalf
   of the client.
+
+Pull Mode
+: The default settlement flow where the client signs the
+  transaction and the server broadcasts it
+  (`type="transaction"`). The server "pulls" the signed
+  transaction from the credential. Enables fee sponsorship
+  and server-side retry logic.
+
+Push Mode
+: The fallback settlement flow where the client broadcasts
+  the transaction itself and presents the confirmed
+  signature (`type="signature"`). The client "pushes" the
+  transaction to the network directly. Cannot be used with
+  fee sponsorship.
 
 # Intent Identifier
 
@@ -804,7 +820,7 @@ provided directly by the client.
 Two settlement flows are supported, corresponding to
 the two credential types.
 
-## Server-Broadcast Settlement (type="transaction")
+## Pull Mode Settlement (type="transaction")
 
 For `type="transaction"` credentials, the client signs
 the transaction and sends it to the server. The server
@@ -856,7 +872,7 @@ optionally adds a fee payer signature and broadcasts:
    the resource with a Payment-Receipt header whose
    `reference` field is the transaction signature.
 
-## Client-Broadcast Settlement (type="signature")
+## Push Mode Settlement (type="signature")
 
 For `type="signature"` credentials, the client broadcasts
 the transaction itself and presents the confirmed signature:
@@ -1265,7 +1281,7 @@ by {{I-D.httpauth-payment}}:
 
 # Examples
 
-## Native SOL Charge (Server-Broadcast)
+## Native SOL Charge (Pull Mode)
 
 **Challenge:**
 
@@ -1376,7 +1392,7 @@ Decoded `request`:
 }
 ~~~
 
-## Client-Broadcast Fallback (type="signature")
+## Push Mode Fallback (type="signature")
 
 ~~~http
 GET /weather HTTP/1.1
