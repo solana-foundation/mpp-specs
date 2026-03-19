@@ -290,18 +290,18 @@ amount
   decimal string. For native SOL, the amount is in lamports.
   For SPL tokens, the amount is in the token's smallest unit
   (e.g., for USDC with 6 decimals, "1000000" represents
-  1 USDC). The value MUST be a positive integer.
+  1 USDC). The value MUST be a positive integer that fits
+  in a 64-bit unsigned integer (max 18,446,744,073,709,551,615).
 
 currency
 : REQUIRED. Identifies the unit for `amount`. For native SOL,
   MUST be the string "SOL" (uppercase). For SPL tokens, SHOULD
   be a human-readable identifier (e.g., "USDC") or MAY be the
-  token mint address. Payment method specifications MUST
-  document which currency formats they support.
+  token mint address. MUST NOT exceed 128 characters.
 
 description
 : OPTIONAL. A human-readable memo describing the resource or
-  service being paid for.
+  service being paid for. MUST NOT exceed 256 characters.
 
 recipient
 : REQUIRED. The base58-encoded public key of the account
@@ -313,7 +313,8 @@ recipient
 externalId
 : OPTIONAL. Merchant's reference (e.g., order ID, invoice
   number), per {{I-D.payment-intent-charge}}. May be used
-  for reconciliation or idempotency. When present, clients
+  for reconciliation or idempotency. MUST NOT exceed 566
+  bytes (Solana Memo Program limit). When present, clients
   SHOULD include this value as a Memo Program instruction
   in the transaction, making it visible on-chain for
   auditing and reconciliation. Servers MAY verify the memo
@@ -338,10 +339,11 @@ splToken
 
 decimals
 : Conditionally REQUIRED. The number of decimal places
-  for the SPL token. MUST be present when `splToken` is
-  present; MUST be absent when `splToken` is absent. Used
-  by the client to construct a `TransferChecked` instruction
-  and by the server to verify the transfer amount.
+  for the SPL token (0–9). MUST be present when `splToken`
+  is present; MUST be absent when `splToken` is absent.
+  Used by the client to construct a `TransferChecked`
+  instruction and by the server to verify the transfer
+  amount.
 
 tokenProgram
 : OPTIONAL. The base58-encoded program ID of the token
@@ -360,10 +362,11 @@ tokenProgram
 
 reference
 : REQUIRED. A server-generated unique identifier for this
-  payment challenge, encoded as a string. The server uses
-  this value to correlate incoming credentials with issued
-  challenges and to enforce single-use semantics. MUST
-  be unique per challenge.
+  payment challenge, encoded as a string. MUST NOT exceed
+  128 characters. The server uses this value to correlate
+  incoming credentials with issued challenges and to
+  enforce single-use semantics. MUST be unique per
+  challenge.
 
 feePayer
 : OPTIONAL. A boolean indicating whether the server will
@@ -379,15 +382,17 @@ feePayerKey
   transaction fee payer when constructing the transaction.
 
 splits
-: OPTIONAL. An array of additional payment splits. Each
-  entry is a JSON object with the following fields:
+: OPTIONAL. An array of at most 32 additional payment
+  splits. Each entry is a JSON object with the following
+  fields:
 
   - `recipient` (REQUIRED): Base58-encoded public key of
     the split recipient.
   - `amount` (REQUIRED): Amount in the same base units
     and asset as the primary `amount`.
   - `memo` (OPTIONAL): Human-readable label for this
-    split (e.g., "platform fee", "referral").
+    split (e.g., "platform fee", "referral"). MUST NOT
+    exceed 566 bytes (Solana Memo Program limit).
 
   When present, the client MUST include a transfer
   instruction for each split in addition to the primary
@@ -529,9 +534,10 @@ signed transaction.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | REQUIRED | `"transaction"` |
-| `transaction` | string | REQUIRED | Base64-encoded serialized signed transaction bytes |
+| `transaction` | string | REQUIRED | Base64-encoded serialized signed transaction bytes (max 1232 bytes decoded) |
 
 The transaction MUST be a valid Solana versioned transaction
+that does not exceed the 1232-byte transaction size limit.
 containing the transfer instruction(s) matching the challenge
 parameters. The client MUST sign the transaction with the
 transfer authority key. When `feePayer` is `false` or absent,
