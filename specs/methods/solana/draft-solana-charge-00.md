@@ -640,34 +640,34 @@ Upon receiving a request with a credential, the server MUST:
 
 For credentials with `type="transaction"`:
 
-1. Decode the base64 `payload.transaction` value and
-   deserialize the Solana transaction.
+1. Decode the base64 `payload.transaction` value.
 
-2. Verify the transaction contains a valid transfer
-   instruction matching the challenge parameters, as
-   described in {{sol-verification}} or
-   {{spl-verification}}.
+2. If `feePayer` is `true`, deserialize the transaction,
+   add the server's fee payer signature using the
+   `feePayerKey`, and re-serialize. The transaction
+   MUST have the server's `feePayerKey` set as the fee
+   payer account.
 
-3. Verify the transaction is signed by the transfer
-   authority (the client).
+3. Simulate the transaction using the `simulateTransaction`
+   RPC method. If simulation fails, reject the credential.
+   This catches invalid transactions without spending fees,
+   which is especially important in fee payer mode (see
+   {{transaction-simulation}}).
 
-4. If `feePayer` is `true`, verify the transaction's fee
-   payer matches the server's `feePayerKey`. Sign the
-   transaction with the fee payer key.
-
-5. If `feePayer` is `false` or absent, verify the
-   transaction is fully signed (including the fee payer
-   signature).
-
-6. Broadcast the transaction to the Solana network using
+4. Broadcast the transaction to the Solana network using
    `sendTransaction`.
 
-7. Wait for confirmation at the required commitment level.
+5. Wait for confirmation at the required commitment level.
 
-8. Record the transaction signature as consumed to
+6. Fetch the confirmed transaction using `getTransaction`
+   with `jsonParsed` encoding and verify the transfer
+   details match the challenge request, as described in
+   {{sol-verification}} or {{spl-verification}}.
+
+7. Record the transaction signature as consumed to
    prevent replay (see {{replay-protection}}).
 
-9. Return the resource with a Payment-Receipt header.
+8. Return the resource with a Payment-Receipt header.
 
 ## Signature Credential Verification {#signature-verification}
 
@@ -779,27 +779,42 @@ optionally adds a fee payer signature and broadcasts:
       |-------------------------->  |                           |
       |                             |                           |
       |                             |  (2) If feePayer: true,   |
-      |                             |      add fee payer sig    |
+      |                             |      co-sign as fee payer |
       |                             |                           |
-      |                             |  (3) sendTransaction      |
+      |                             |  (3) simulateTransaction  |
       |                             |------------------------>  |
-      |                             |                           |
-      |                             |  (4) Confirmation         |
+      |                             |  (4) Simulation OK        |
       |                             |<------------------------  |
       |                             |                           |
-      |  (5) 200 OK + Receipt       |                           |
+      |                             |  (5) sendTransaction      |
+      |                             |------------------------>  |
+      |                             |  (6) Confirmation         |
+      |                             |<------------------------  |
+      |                             |                           |
+      |                             |  (7) getTransaction       |
+      |                             |      (verify transfer)    |
+      |                             |------------------------>  |
+      |                             |  (8) Parsed tx data       |
+      |                             |<------------------------  |
+      |                             |                           |
+      |  (9) 200 OK + Receipt       |                           |
       |<--------------------------  |                           |
       |                             |                           |
 ~~~
 
 1. Client submits credential containing signed transaction
    bytes.
-2. If `feePayer` is `true`, the server adds its fee payer
-   signature.
-3. Server broadcasts the transaction to Solana.
-4. Transaction reaches the required commitment level.
-5. Server returns the resource with a Payment-Receipt header
-   whose `reference` field is the transaction signature.
+2. If `feePayer` is `true`, the server co-signs with its
+   fee payer key.
+3. Server simulates the transaction to catch failures
+   without spending fees.
+4. Server broadcasts the transaction to Solana.
+5. Transaction reaches the required commitment level.
+6. Server fetches the confirmed transaction and verifies
+   the transfer details match the challenge request.
+7. Server records the signature as consumed and returns
+   the resource with a Payment-Receipt header whose
+   `reference` field is the transaction signature.
 
 ## Client-Broadcast Settlement (type="signature")
 
