@@ -66,7 +66,7 @@ informative:
     target: https://datatracker.ietf.org/doc/html/draft-msporny-base58-03
     author:
       - name: Manu Sporny
-    date: 2026
+    date: 2023
 ---
 
 --- abstract
@@ -519,11 +519,12 @@ payload
   defined: `"transaction"` (default) and `"signature"`
   (fallback).
 
-## Transaction Payload (type="transaction") {#transaction-payload}
+## Transaction Payload — Pull Mode {#transaction-payload}
 
-When `type` is `"transaction"`, the client sends the signed
-transaction bytes to the server for broadcast. The `transaction`
-field contains the base64-encoded serialized signed transaction.
+In pull mode (`type="transaction"`), the client sends the
+signed transaction bytes to the server for broadcast. The
+`transaction` field contains the base64-encoded serialized
+signed transaction.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -560,12 +561,12 @@ Example (decoded):
 }
 ~~~
 
-## Signature Payload (type="signature") {#signature-payload}
+## Signature Payload — Push Mode {#signature-payload}
 
-When `type` is `"signature"`, the client has already broadcast
-the transaction to the Solana network. The `signature` field
-contains the base58-encoded transaction signature for the
-server to verify on-chain.
+In push mode (`type="signature"`), the client has already
+broadcast the transaction to the Solana network. The
+`signature` field contains the base58-encoded transaction
+signature for the server to verify on-chain.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -591,7 +592,7 @@ Example (decoded):
 }
 ~~~
 
-## Limitations of type="signature" {#signature-limitations}
+## Limitations of Push Mode {#signature-limitations}
 
 The `type="signature"` credential has the following limitations:
 
@@ -692,7 +693,7 @@ Upon receiving a request with a credential, the server MUST:
    - For `type="transaction"`: see {{transaction-verification}}.
    - For `type="signature"`: see {{signature-verification}}.
 
-## Transaction Credential Verification {#transaction-verification}
+## Pull Mode Verification {#transaction-verification}
 
 For credentials with `type="transaction"`:
 
@@ -725,7 +726,7 @@ For credentials with `type="transaction"`:
 
 8. Return the resource with a Payment-Receipt header.
 
-## Signature Credential Verification {#signature-verification}
+## Push Mode Verification {#signature-verification}
 
 For credentials with `type="signature"`:
 
@@ -1101,79 +1102,57 @@ All communication MUST use TLS 1.2 or higher. Solana
 credentials MUST only be transmitted over HTTPS
 connections.
 
-## Transaction Signature Uniqueness
-
-Each Solana transaction has a unique signature derived
-from the signer's private key and the transaction
-message (which includes a recent blockhash). This
-ensures that transaction signatures are globally unique
-and serve as natural replay prevention tokens.
-
 ## Replay Protection
 
 Servers MUST track consumed transaction signatures and
 reject any signature that has already been accepted.
 The check-and-consume operation MUST be atomic to
 prevent race conditions where concurrent requests
-present the same signature.
+present the same signature. Transaction signatures are
+globally unique on the Solana network (derived from the
+signer's key and the blockhash), making them natural
+replay prevention tokens.
 
-## Amount Verification
+## Client-Side Verification
 
-Clients MUST parse and verify the `request` payload
-before signing any transaction:
+Clients MUST verify the challenge before signing:
 
-1. Verify `amount` is reasonable for the service
-2. Verify `currency` matches the expected asset
-3. Verify `recipient` is the expected party
-4. If `splToken` is present, verify it is the
-   expected token mint address
+1. `amount` is reasonable for the service
+2. `currency` matches the expected asset
+3. `recipient` is the expected party
+4. `splToken`, if present, is a known token mint
+5. `splits`, if present, contain expected recipients
+   and amounts — malicious servers could add splits
+   to redirect funds
+6. `feePayerKey`, if present, is the expected server
 
-Malicious servers could request excessive amounts or
-direct payments to unexpected recipients.
+Malicious servers could request excessive amounts,
+direct payments to unexpected recipients, or add
+hidden splits.
 
 ## RPC Trust
 
 The server relies on its Solana RPC endpoint to
-provide accurate transaction data. Servers SHOULD
-use trusted RPC providers or run their own validator
-nodes. A compromised RPC endpoint could return
+provide accurate transaction data for on-chain
+verification. A compromised RPC could return
 fabricated transaction data, causing the server to
-accept payments that were never made.
+accept payments that were never made. Servers SHOULD
+use trusted RPC providers or run their own nodes.
 
-## Associated Token Account Creation
+## Front-running (Push Mode)
 
-When paying with SPL tokens, the client creates the
-recipient's associated token account if it does not
-exist. This costs approximately 0.002 SOL in rent.
-Malicious servers could exploit this to drain small
-amounts of SOL from clients by requesting payments
-to recipients that have never held the token. Clients
-SHOULD be aware of this additional cost.
-
-## Confirmation Level Trade-offs
-
-Accepting transactions at `confirmed` commitment
-provides faster settlement but carries a small risk
-of the transaction being dropped before finalization.
-Servers handling high-value transactions SHOULD
-require `finalized` commitment. Servers MUST
-document which commitment level they require.
-
-## Front-running
-
-For `type="signature"` credentials, because the client
-broadcasts the transaction before presenting the
-credential, the transaction is visible on-chain. A
-malicious party monitoring the mempool or chain could
-attempt to front-run by presenting the same signature
-to the server. The challenge binding (the credential
-echoes the challenge `id`) and single-use signature
+In push mode, the client broadcasts the transaction
+before presenting the credential, making it visible
+on-chain. A party monitoring the chain could attempt
+to present the same signature to the server. The
+challenge binding (the credential echoes the challenge
+`id`, which is HMAC-verified) and single-use signature
 enforcement mitigate this: only the party that received
-the challenge can construct a valid credential for it.
+the challenge can construct a valid credential.
 
-For `type="transaction"` credentials, front-running is
-not a concern because the transaction is not broadcast
-until the server receives and validates the credential.
+Pull mode is not susceptible to front-running because
+the transaction is not broadcast until the server
+receives and validates the credential.
 
 ## Fee Payer Risks {#fee-payer-risks}
 
@@ -1181,79 +1160,63 @@ Servers acting as fee payers accept financial risk in
 exchange for providing a seamless payment experience.
 
 Denial of Service via Bad Transactions
-: Malicious clients could submit valid-looking
-  transactions that fail on-chain (e.g., insufficient
-  token balance, wrong program invocation), causing the
-  server to pay transaction fees without receiving
-  payment. Each failed transaction costs the server
-  approximately 5,000 lamports (0.000005 SOL) in base
-  fees, which can accumulate under sustained attack.
+: Malicious clients could submit transactions that
+  fail on-chain (insufficient balance, invalid
+  instructions), causing the server to pay ~5,000
+  lamports per failed transaction. Mitigations:
 
-Mitigation Strategies
-: Servers SHOULD implement the following protections:
-
-  - **Rate limiting**: Limit the number of fee-sponsored
-    transactions per client address, per IP address, or
+  - **Transaction simulation**: `simulateTransaction`
+    catches most failures before broadcast, without
+    spending fees. Servers SHOULD simulate all pull
+    mode transactions before broadcasting.
+  - **Rate limiting**: per client address, per IP, or
     per time window.
-  - **Transaction simulation**: Use the `simulateTransaction`
-    RPC method to verify the transaction will succeed
-    before signing and broadcasting. This catches most
-    failure modes without spending fees.
-  - **Balance verification**: Before signing, verify via
-    RPC that the client has sufficient balance to cover
-    the transfer amount.
-  - **Client authentication**: Require client identity
-    verification (e.g., API keys, OAuth tokens) before
-    accepting fee-sponsored transactions.
+  - **Balance verification**: check the client's
+    balance covers the transfer amount before signing.
+  - **Client authentication**: require API keys or
+    OAuth tokens before accepting fee-sponsored
+    transactions.
 
 ATA Rent Drain
-: When the fee payer funds the creation of an Associated
-  Token Account (ATA) for the recipient, it pays
-  approximately 0.002 SOL in rent. The recipient can
-  close the ATA at any time to reclaim this rent, then
-  the next payment to the same recipient re-creates the
-  ATA at the fee payer's expense. A malicious or
-  opportunistic recipient can repeat this cycle to drain
-  the fee payer's SOL balance. Servers SHOULD verify via
-  RPC that the recipient's ATA already exists before
-  signing a fee-sponsored transaction that includes an
-  ATA creation instruction. Alternatively, servers MAY
-  require recipients to maintain their own ATAs, or
-  factor the ATA rent cost into the payment amount.
+: When the fee payer funds creation of an Associated
+  Token Account (ATA), it pays ~0.002 SOL in rent.
+  The recipient can close the ATA to reclaim rent,
+  then the next payment re-creates it at the fee
+  payer's expense. Servers SHOULD verify the
+  recipient's ATA exists before co-signing, or factor
+  rent cost into the payment amount via `splits`.
 
 Fee Payer Balance Exhaustion
-: Servers MUST monitor their fee payer account balance
-  and reject new fee-sponsored requests when the balance
-  is insufficient to cover transaction fees. The server
-  SHOULD return a standard 402 response with a fresh
-  challenge that has `feePayer` set to `false`, allowing
-  the client to pay its own fees as a fallback.
-
-## Transaction Simulation
-
-For `type="transaction"` credentials, servers SHOULD simulate
-the transaction using the `simulateTransaction` RPC method
-before broadcasting. Simulation detects failures such as
-insufficient funds, invalid instructions, or exceeded compute
-limits without consuming fees or landing a failed transaction
-on-chain. This is especially important when the server acts
-as fee payer ({{fee-sponsorship}}), as a failed broadcast
-wastes the fee payer's SOL.
-
-Servers MUST reject the credential if simulation indicates
-an error, returning a fresh 402 challenge.
+: Servers MUST monitor fee payer balance and reject
+  new fee-sponsored requests when insufficient. The
+  server SHOULD return a 402 with `feePayer: false`,
+  allowing the client to pay its own fees as fallback.
 
 ## Transaction Payload Security
 
-For `type="transaction"` credentials, the server MUST
-thoroughly verify the transaction contents before
-signing (as fee payer) or broadcasting. A malicious
-client could craft a transaction that transfers funds
-FROM the server's fee payer account rather than simply
-paying fees. Servers MUST verify that the only
-instructions in the transaction are the expected
-transfer instruction(s) and, optionally, compute
-budget instructions.
+In pull mode, the server receives raw transaction
+bytes from the client. A malicious client could craft
+a transaction that transfers funds FROM the server's
+fee payer account rather than simply paying fees.
+
+Servers MUST verify that the transaction contains
+only the expected instructions: transfer instruction(s)
+matching the challenge parameters, ATA creation
+(idempotent), and optionally compute budget
+instructions. Any unexpected instructions MUST cause
+rejection.
+
+## Blockhash Freshness
+
+When the server provides `recentBlockhash` in the
+challenge, clients SHOULD verify it is plausible
+(not obviously stale). A malicious server could
+provide an expired blockhash, causing the client to
+sign a transaction that will never land — wasting
+the signing effort. However, since the transaction
+is not broadcast by the client in pull mode, the
+practical risk is limited to a failed payment
+attempt that the client can retry.
 
 # IANA Considerations
 
@@ -1281,9 +1244,15 @@ by {{I-D.httpauth-payment}}:
 
 # Examples
 
+The following examples illustrate the complete HTTP exchange
+for each flow. Base64url values are shown with their decoded
+JSON below.
+
 ## Native SOL Charge (Pull Mode)
 
-**Challenge:**
+A 0.01 SOL charge for weather API access.
+
+**1. Challenge (402 response):**
 
 ~~~http
 HTTP/1.1 402 Payment Required
@@ -1291,7 +1260,13 @@ WWW-Authenticate: Payment id="kM9xPqWvT2nJrHsY4aDfEb",
   realm="api.example.com",
   method="solana",
   intent="charge",
-  request="eyJhbW91bnQiOiIxMDAwMDAwMCIsImN1cnJlbmN5IjoiU09MIiwiZGVzY3JpcHRpb24iOiJXZWF0aGVyIEFQSSBhY2Nlc3MiLCJtZXRob2REZXRhaWxzIjp7Im5ldHdvcmsiOiJtYWlubmV0LWJldGEiLCJyZWZlcmVuY2UiOiJmNDdhYzEwYi01OGNjLTQzNzItYTU2Ny0wZTAyYjJjM2Q0NzkifSwicmVjaXBpZW50IjoiN3hLWHRnMkNXODdkOTdUWEpTRHBiRDVqQmtoZVRxQTgzVFpSdUpvc2dBc1UifQ",
+  request="eyJhbW91bnQiOiIxMDAwMDAwMCIsImN1cnJlbmN5Ij
+    oiU09MIiwiZGVzY3JpcHRpb24iOiJXZWF0aGVyIEFQSSBhY2
+    Nlc3MiLCJtZXRob2REZXRhaWxzIjp7Im5ldHdvcmsiOiJtYWl
+    ubmV0LWJldGEiLCJyZWZlcmVuY2UiOiJmNDdhYzEwYi01OGNj
+    LTQzNzItYTU2Ny0wZTAyYjJjM2Q0NzkifSwicmVjaXBpZW50I
+    joiN3hLWHRnMkNXODdkOTdUWEpTRHBiRDVqQmtoZVRxQTgzVF
+    pSdUpvc2dBc1UifQ",
   expires="2026-03-15T12:05:00Z"
 Cache-Control: no-store
 ~~~
@@ -1302,21 +1277,21 @@ Decoded `request`:
 {
   "amount": "10000000",
   "currency": "SOL",
+  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Weather API access",
   "methodDetails": {
     "network": "mainnet-beta",
     "reference": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-  },
-  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+  }
 }
 ~~~
 
-**Credential (type="transaction"):**
+**2. Credential (retry with signed transaction):**
 
 ~~~http
 GET /weather HTTP/1.1
 Host: api.example.com
-Authorization: Payment eyJjaGFsbGVuZ2UiOnsiaWQiOiJrTTl4UHFXdlQybkpySHNZNGFEZkViIiwicmVhbG0iOiJhcGkuZXhhbXBsZS5jb20iLCJtZXRob2QiOiJzb2xhbmEiLCJpbnRlbnQiOiJjaGFyZ2UiLCJyZXF1ZXN0IjoiZXlKLi4uIiwiZXhwaXJlcyI6IjIwMjYtMDMtMTVUMTI6MDU6MDBaIn0sInBheWxvYWQiOnsidHlwZSI6InRyYW5zYWN0aW9uIiwidHJhbnNhY3Rpb24iOiJBUUFBQUEuLi4ifX0
+Authorization: Payment <base64url-encoded credential>
 ~~~
 
 Decoded credential:
@@ -1328,21 +1303,21 @@ Decoded credential:
     "realm": "api.example.com",
     "method": "solana",
     "intent": "charge",
-    "request": "eyJ...",
+    "request": "<base64url-encoded request>",
     "expires": "2026-03-15T12:05:00Z"
   },
   "payload": {
     "type": "transaction",
-    "transaction": "AQAAA..."
+    "transaction": "<base64-encoded signed transaction>"
   }
 }
 ~~~
 
-**Response:**
+**3. Response (with receipt):**
 
 ~~~http
 HTTP/1.1 200 OK
-Payment-Receipt: eyJjaGFsbGVuZ2VJZCI6ImtNOXhQcVd2VDJuSnJIc1k0YURmRWIiLCJtZXRob2QiOiJzb2xhbmEiLCJyZWZlcmVuY2UiOiI1VWZEdVg3aFhiUGpHVXBUbXQ5UEhSTHNOR0plNGRFbnkuLi4iLCJzdGF0dXMiOiJzdWNjZXNzIiwidGltZXN0YW1wIjoiMjAyNi0wMy0xMFQyMTowMDowMFoifQ
+Payment-Receipt: <base64url-encoded receipt>
 Content-Type: application/json
 
 {"temperature": 72, "condition": "sunny"}
@@ -1353,27 +1328,17 @@ Decoded receipt:
 ~~~json
 {
   "method": "solana",
-  "challengeId": "kM9xPqWvT2nJrHsY4aDfEb",
-  "reference": "5UfDuX7hXbPjGUpTmt9PHRLsNGJe4dEny...",
+  "reference": "4vJ9YFuPzUgdLkWYJf3KqfNM8cTnBp3jXx...",
   "status": "success",
-  "timestamp": "2026-03-10T21:00:00Z"
+  "timestamp": "2026-03-15T12:04:58Z"
 }
 ~~~
 
-## SPL Token (USDC) Charge
+## SPL Token (USDC) Charge with Fee Sponsorship
 
-**Challenge:**
-
-~~~http
-HTTP/1.1 402 Payment Required
-WWW-Authenticate: Payment id="xN7aPqWvR3mKsHtY5bCgFd",
-  realm="api.example.com",
-  method="solana",
-  intent="charge",
-  request="eyJhbW91bnQiOiIxMDAwMDAwIiwiY3VycmVuY3kiOiJVU0RDIiwiZGVzY3JpcHRpb24iOiJQcmVtaXVtIEFQSSBjYWxsIiwibWV0aG9kRGV0YWlscyI6eyJkZWNpbWFscyI6NiwibmV0d29yayI6Im1haW5uZXQtYmV0YSIsInJlZmVyZW5jZSI6ImExYjJjM2Q0LWU1ZjYtNzg5MC1hYmNkLWVmMTIzNDU2Nzg5MCIsInNwbFRva2VuIjoiRVBqRldkZDVBdWZxU1NxZU0ycU4xeHp5YmFwQzhHNHdFR0drWnd5VER0MXYifSwicmVjaXBpZW50IjoiN3hLWHRnMkNXODdkOTdUWEpTRHBiRDVqQmtoZVRxQTgzVFpSdUpvc2dBc1UifQ",
-  expires="2026-03-15T12:05:00Z"
-Cache-Control: no-store
-~~~
+A 1 USDC charge where the server sponsors transaction fees
+and includes a `recentBlockhash` to eliminate client RPC
+dependency.
 
 Decoded `request`:
 
@@ -1381,87 +1346,88 @@ Decoded `request`:
 {
   "amount": "1000000",
   "currency": "USDC",
+  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Premium API call",
   "methodDetails": {
-    "decimals": 6,
     "network": "mainnet-beta",
+    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimals": 6,
+    "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
     "reference": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-  },
-  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+    "feePayer": true,
+    "feePayerKey": "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr",
+    "recentBlockhash": "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N"
+  }
 }
 ~~~
 
-## Push Mode Fallback (type="signature")
-
-~~~http
-GET /weather HTTP/1.1
-Host: api.example.com
-Authorization: Payment eyJjaGFsbGVuZ2UiOnsiaWQiOiJrTTl4UHFXdlQybkpySHNZNGFEZkViIiwicmVhbG0iOiJhcGkuZXhhbXBsZS5jb20iLCJtZXRob2QiOiJzb2xhbmEiLCJpbnRlbnQiOiJjaGFyZ2UiLCJyZXF1ZXN0IjoiZXlKLi4uIiwiZXhwaXJlcyI6IjIwMjYtMDMtMTVUMTI6MDU6MDBaIn0sInBheWxvYWQiOnsidHlwZSI6InNpZ25hdHVyZSIsInNpZ25hdHVyZSI6IjVVZkR1WDdoWGJQakdVcFRtdDlQSFJMc05HSmU0ZEVueS4uLiJ9fQ
-~~~
+The client uses `recentBlockhash` from the challenge (no RPC
+call needed), sets `feePayerKey` as the transaction fee payer,
+and partially signs with its own key only. The server
+co-signs as fee payer and broadcasts.
 
 Decoded credential:
 
 ~~~json
 {
-  "challenge": {
-    "id": "kM9xPqWvT2nJrHsY4aDfEb",
-    "realm": "api.example.com",
-    "method": "solana",
-    "intent": "charge",
-    "request": "eyJ...",
-    "expires": "2026-03-15T12:05:00Z"
-  },
-  "payload": {
-    "type": "signature",
-    "signature": "5UfDuX7hXbPjGUpTmt9PHRLsNGJe4dEny..."
-  }
-}
-~~~
-
-## Fee Sponsorship Example
-
-**Challenge with fee sponsorship:**
-
-~~~json
-{
-  "amount": "10000000",
-  "currency": "SOL",
-  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-  "description": "Weather API access",
-  "methodDetails": {
-    "network": "mainnet-beta",
-    "reference": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "feePayer": true,
-    "feePayerKey": "9aE3Fg7HjKLmNpQr5TuVwXyZ2AbCdEf8GhIjKlMnOp1R"
-  }
-}
-~~~
-
-**Credential (partially signed, server pays fees):**
-
-~~~json
-{
-  "challenge": {
-    "id": "kM9xPqWvT2nJrHsY4aDfEb",
-    "realm": "api.example.com",
-    "method": "solana",
-    "intent": "charge",
-    "request": "eyJ...",
-    "expires": "2026-03-15T12:05:00Z"
-  },
+  "challenge": { "..." : "echoed challenge" },
   "payload": {
     "type": "transaction",
-    "transaction": "AQAAA...partially-signed-tx..."
+    "transaction": "<base64-encoded partially-signed tx>"
   }
 }
 ~~~
 
-The server receives the partially signed transaction, adds the
-fee payer signature using the `feePayerKey` account, and
-broadcasts the fully signed transaction.
+## Push Mode (type="signature")
+
+The client broadcasts the transaction itself and presents
+the confirmed signature. Cannot be used with fee sponsorship.
+
+Decoded credential:
+
+~~~json
+{
+  "challenge": { "..." : "echoed challenge" },
+  "payload": {
+    "type": "signature",
+    "signature": "4vJ9YFuPzUgdLkWYJf3KqfNM8cTnBp3jXx..."
+  }
+}
+~~~
+
+## Payment Splits
+
+A marketplace charge of 1.05 USDC where 0.05 USDC goes to
+the platform as a fee.
+
+Decoded `request`:
+
+~~~json
+{
+  "amount": "1050000",
+  "currency": "USDC",
+  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "description": "Marketplace purchase",
+  "methodDetails": {
+    "network": "mainnet-beta",
+    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimals": 6,
+    "reference": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "splits": [
+      {
+        "recipient": "3pF8Kg2aHbNvJkLMwEqR7YtDxZ5sGhJn4UV6mWcXrT9A",
+        "amount": "50000",
+        "memo": "platform fee"
+      }
+    ]
+  }
+}
+~~~
+
+The client builds a transaction with two transfers: 1,000,000
+base units to the primary recipient and 50,000 to the platform.
 
 # Acknowledgements
 
-The author thanks the Solana developer community and the
+The authors thank the Solana developer community and the
 MPP working group for their input on this specification.
