@@ -294,10 +294,13 @@ amount
   in a 64-bit unsigned integer (max 18,446,744,073,709,551,615).
 
 currency
-: REQUIRED. Identifies the unit for `amount`. For native SOL,
-  MUST be the string "SOL" (uppercase). For SPL tokens, SHOULD
-  be a human-readable identifier (e.g., "USDC") or MAY be the
-  token mint address. MUST NOT exceed 128 characters.
+: REQUIRED. For native SOL, MUST be the string (lowercase)
+  . For SPL tokens, MUST be the base58-encoded
+  mint address (e.g.,
+  `"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"`
+  for USDC). The mint address uniquely identifies the token
+  and is used by the client to construct the transfer
+  instruction. MUST NOT exceed 128 characters.
 
 description
 : OPTIONAL. A human-readable memo describing the resource or
@@ -332,22 +335,16 @@ network
   if omitted. Clients MUST reject challenges whose
   network does not match their configured cluster.
 
-splToken
-: OPTIONAL. The base58-encoded mint address of the SPL
-  token to transfer. If omitted, the payment is in native
-  SOL. When present, `decimals` MUST also be present.
-
 decimals
 : Conditionally REQUIRED. The number of decimal places
-  for the SPL token (0–9). MUST be present when `splToken`
-  is present; MUST be absent when `splToken` is absent.
-  Used by the client to construct a `TransferChecked`
-  instruction and by the server to verify the transfer
-  amount.
+  for the token (0–9). MUST be present when `currency`
+  is a mint address; MUST be absent when `currency` is
+  `"sol"`. Used by the client to construct a
+  `TransferChecked` instruction.
 
 tokenProgram
 : OPTIONAL. The base58-encoded program ID of the token
-  program governing the SPL token. MUST be either the
+  program governing the token. MUST be either the
   Token Program
   (`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`) or
   the Token-2022 Program
@@ -356,9 +353,8 @@ tokenProgram
   program by fetching the mint account from the network
   and inspecting its owner program. Servers SHOULD
   include this field as a hint to avoid the extra RPC
-  lookup, but clients MUST NOT fail if the field is
-  absent — they MUST resolve it from the mint. MUST NOT
-  be present when `splToken` is absent.
+  lookup. MUST NOT be present when `currency` is
+  `"sol"`.
 
 reference
 : REQUIRED. A server-generated unique identifier for this
@@ -397,7 +393,7 @@ splits
   When present, the client MUST include a transfer
   instruction for each split in addition to the primary
   transfer to `recipient`. All splits use the same asset
-  as the primary payment (native SOL or the `splToken`).
+  as the primary payment (native SOL or the token from `currency`).
 
   The top-level `amount` is the total the client pays.
   The sum of all split amounts MUST NOT exceed `amount`.
@@ -425,7 +421,7 @@ recentBlockhash
 ~~~json
 {
   "amount": "10000000",
-  "currency": "SOL",
+  "currency": "sol",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Weather API access",
   "methodDetails": {
@@ -442,12 +438,11 @@ This requests a transfer of 0.01 SOL (10,000,000 lamports).
 ~~~json
 {
   "amount": "1000000",
-  "currency": "USDC",
+  "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Premium API call",
   "methodDetails": {
     "network": "mainnet-beta",
-    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "decimals": 6,
     "reference": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
   }
@@ -461,7 +456,7 @@ This requests a transfer of 1 USDC (1,000,000 base units).
 ~~~json
 {
   "amount": "10000000",
-  "currency": "SOL",
+  "currency": "sol",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Weather API access",
   "methodDetails": {
@@ -481,12 +476,11 @@ transaction fees.
 ~~~json
 {
   "amount": "1050000",
-  "currency": "USDC",
+  "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Marketplace purchase",
   "methodDetails": {
     "network": "mainnet-beta",
-    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "decimals": 6,
     "reference": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
     "splits": [
@@ -660,8 +654,6 @@ When acting as fee payer, servers:
   account to cover transaction fees
 - MUST verify the transaction contents before signing
   (see {{transaction-verification}})
-- MAY recover fee costs through pricing or other business
-  logic
 - SHOULD implement rate limiting to mitigate fee
   exhaustion attacks (see {{fee-payer-risks}})
 
@@ -765,7 +757,7 @@ transfer verification logic defined in
 
 ## Native SOL Verification {#sol-verification}
 
-For native SOL payments (no `splToken` in `methodDetails`),
+For native SOL payments (`currency` is `"sol"`),
 the server MUST:
 
 1. Locate a System Program `transfer` instruction in the
@@ -782,21 +774,21 @@ the server MUST reject the credential.
 
 ## SPL Token Verification {#spl-verification}
 
-For SPL token payments (`splToken` present in
+For SPL token payments (`currency` is a mint address (not `"sol"`) in
 `methodDetails`), the server MUST:
 
 1. Locate a `transferChecked` instruction from the
    appropriate token program (Token Program or
    Token-2022) in the transaction's parsed instructions.
 
-2. Verify the `mint` field matches the `splToken` from
+2. Verify the `mint` field matches the `currency` from
    `methodDetails`.
 
 3. Verify the `tokenAmount.amount` field matches the
    `amount` from the challenge request.
 
 4. Derive the expected destination associated token
-   account from the `recipient`, `splToken`, and
+   account from the `recipient`, `currency`, and
    `tokenProgram` in the challenge request. Verify the
    `destination` field in the instruction matches this
    derived ATA address.
@@ -946,7 +938,7 @@ The client MUST construct a transaction containing:
 2. A `transferChecked` instruction on the appropriate
    token program with:
    - `source`: the client's associated token account
-   - `mint`: the `splToken` from `methodDetails`
+   - `mint`: the `currency` field
    - `destination`: the recipient's derived ATA
    - `authority`: the client's signing account
    - `amount`: the `amount` from the challenge
@@ -1038,63 +1030,22 @@ When rejecting a credential, the server MUST return HTTP
 {{I-D.httpauth-payment}}. The server SHOULD include a
 response body conforming to RFC 9457 {{RFC9457}} Problem
 Details, with `Content-Type: application/problem+json`.
-The following problem types are defined for this intent:
+Servers MUST use the standard problem types defined in
+{{I-D.httpauth-payment}}: `malformed-credential`,
+`invalid-challenge`, and `verification-failed`. The
+`detail` field SHOULD contain a human-readable
+description of the specific failure (e.g., "Transaction
+not found", "Amount mismatch", "Signature already
+consumed").
 
-https://paymentauth.org/problems/solana/malformed-credential
-: HTTP 402. The credential token could not be decoded, the
-  JSON could not be parsed, or required fields (`challenge`,
-  `payload`, `payload.type`) are absent or have the wrong
-  type. A fresh challenge MUST be included in
-  `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/unknown-challenge
-: HTTP 402. The value of `credential.challenge.id` does
-  not match any challenge issued by this server, or the
-  challenge has already been consumed. A fresh challenge
-  MUST be included in `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/invalid-credential-type
-: HTTP 402. The `payload.type` is `"signature"` but the
-  challenge specifies `feePayer: true`, which requires
-  `type="transaction"`. A fresh challenge MUST be included
-  in `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/transaction-not-found
-: HTTP 402. The transaction signature could not be fetched
-  from the Solana network. The transaction may not yet be
-  confirmed, or may not exist. A fresh challenge MUST be
-  included in `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/transaction-failed
-: HTTP 402. The transaction was found on-chain but contains
-  an error in its metadata, indicating it failed during
-  execution. A fresh challenge MUST be included in
-  `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/transfer-mismatch
-: HTTP 402. The on-chain transfer does not match the
-  challenge parameters. This includes: wrong recipient,
-  wrong amount, wrong token mint, or missing transfer
-  instruction. A fresh challenge MUST be included in
-  `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/signature-consumed
-: HTTP 402. The transaction signature has already been
-  used to fulfill a previous challenge. A fresh challenge
-  MUST be included in `WWW-Authenticate`.
-
-https://paymentauth.org/problems/solana/broadcast-failed
-: HTTP 402. The server attempted to broadcast a
-  `type="transaction"` credential but the Solana network
-  rejected it (e.g., invalid signature, insufficient
-  funds, expired blockhash). A fresh challenge MUST be
-  included in `WWW-Authenticate`.
+All error responses MUST include a fresh challenge in
+`WWW-Authenticate`.
 
 Example error response body:
 
 ~~~json
 {
-  "type": "https://paymentauth.org/problems/solana/transfer-mismatch",
+  "type": "https://paymentauth.org/problems/verification-failed",
   "title": "Transfer Mismatch",
   "status": 402,
   "detail": "Destination token account does not belong to expected recipient"
@@ -1127,7 +1078,7 @@ Clients MUST verify the challenge before signing:
 1. `amount` is reasonable for the service
 2. `currency` matches the expected asset
 3. `recipient` is the expected party
-4. `splToken`, if present, is a known token mint
+4. If `currency` is a mint address, verify it is a known token
 5. `splits`, if present, contain expected recipients
    and amounts — malicious servers could add splits
    to redirect funds
@@ -1283,7 +1234,7 @@ Decoded `request`:
 ~~~json
 {
   "amount": "10000000",
-  "currency": "SOL",
+  "currency": "sol",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Weather API access",
   "methodDetails": {
@@ -1352,12 +1303,11 @@ Decoded `request`:
 ~~~json
 {
   "amount": "1000000",
-  "currency": "USDC",
+  "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Premium API call",
   "methodDetails": {
     "network": "mainnet-beta",
-    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "decimals": 6,
     "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
     "reference": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -1412,12 +1362,11 @@ Decoded `request`:
 ~~~json
 {
   "amount": "1050000",
-  "currency": "USDC",
+  "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
   "description": "Marketplace purchase",
   "methodDetails": {
     "network": "mainnet-beta",
-    "splToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "decimals": 6,
     "reference": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
     "splits": [
@@ -1436,5 +1385,5 @@ base units to the primary recipient and 50,000 to the platform.
 
 # Acknowledgements
 
-The authors thank the Solana developer community and the
-MPP working group for their input on this specification.
+The authors thank the Tempo team for their input on this 
+specification.
