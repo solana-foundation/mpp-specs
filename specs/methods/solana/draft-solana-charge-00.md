@@ -61,6 +61,18 @@ informative:
     author:
       - org: Solana Foundation
     date: 2026
+  CONFIDENTIAL-TRANSFER:
+    title: "Token-2022 Confidential Transfer Extension"
+    target: https://www.solana-program.com/docs/confidential-balances
+    author:
+      - org: Solana Foundation
+    date: 2026
+  ZK-ELGAMAL-PROOF:
+    title: "ZK ElGamal Proof Program"
+    target: https://docs.anza.xyz/runtime/zk-elgamal-proof
+    author:
+      - org: Anza
+    date: 2026
   BASE58:
     title: "Base58 Encoding Scheme"
     target: https://datatracker.ietf.org/doc/html/draft-msporny-base58-03
@@ -82,6 +94,14 @@ where the client sends the signed transaction to the server for
 broadcast, and `type="signature"` (fallback), where the client
 broadcasts the transaction itself and presents the on-chain transaction
 signature for server verification.
+
+This document also defines an optional confidential charge profile, in
+which the transferred amount is encrypted on-chain using the Token-2022
+Confidential Transfer extension {{CONFIDENTIAL-TRANSFER}}. Because a
+confidential transfer spans multiple transactions, this profile adds a
+third credential type, `type="bundle"`, and requires the mint to
+designate an auditor so the server can verify the paid amount without
+the amount appearing in cleartext on-chain.
 
 --- middle
 
@@ -242,6 +262,53 @@ Push Mode
   signature (`type="signature"`). The client "pushes" the
   transaction to the network directly. Cannot be used with
   fee sponsorship.
+
+Confidential Transfer
+: A Token-2022 transfer in which the transferred amount is
+  encrypted on-chain using the Confidential Transfer
+  extension {{CONFIDENTIAL-TRANSFER}}. The amount is hidden
+  from public observers; only the sender, the receiver, and a
+  designated auditor can recover it.
+
+Confidential Token Account
+: A Token-2022 associated token account that has been
+  configured for confidential transfers via the
+  `ConfigureAccount` operation, holding an encrypted
+  available balance, an encrypted pending balance, and the
+  owner's ElGamal public key. On mints that do not
+  auto-approve, the account MUST also be approved by the
+  mint's confidential-transfer authority before it can send
+  or receive.
+
+ElGamal Public Key
+: A twisted-ElGamal public key bound to a confidential token
+  account. Transfer amounts are encrypted under the sender's,
+  the receiver's, and (when configured) the auditor's ElGamal
+  public keys.
+
+Auditor
+: A party designated by the mint's `ConfidentialTransferMint`
+  configuration whose ElGamal public key is included in every
+  confidential transfer. The holder of the corresponding
+  ElGamal secret key can decrypt transferred amounts. In this
+  specification the verifying server acts as, or is delegated
+  by, the auditor.
+
+Pending Balance
+: The portion of a confidential account's balance that has
+  received incoming confidential transfers but is not yet
+  spendable. The account owner converts pending balance into
+  spendable available balance with the `ApplyPendingBalance`
+  operation; no other party can perform this step.
+
+Proof Context State Account
+: A short-lived account into which the ZK ElGamal Proof
+  Program {{ZK-ELGAMAL-PROOF}} records a verified proof so
+  that a later instruction in the same or a subsequent
+  transaction can reference it. Because confidential-transfer
+  proofs are too large to share a single transaction with the
+  transfer itself, they are verified into context state
+  accounts first and closed afterward to reclaim rent.
 
 # Intent Identifier
 
@@ -418,6 +485,48 @@ recentBlockhash
   the full lifetime of the payment challenge. If omitted,
   clients MUST fetch a recent blockhash themselves.
 
+confidential
+: OPTIONAL. A boolean indicating that the charge MUST be
+  settled as a Token-2022 confidential transfer
+  ({{confidential}}), in which the transferred amount is
+  encrypted on-chain. Defaults to `false` if omitted. When
+  `true`: `currency` MUST be the mint address of a Token-2022
+  mint whose `ConfidentialTransferMint` extension is enabled
+  and configures an auditor; `tokenProgram`, if present, MUST
+  be the Token-2022 Program; `auditorElgamalPubkey` MUST be
+  present; the credential MUST use `type="bundle"`
+  ({{bundle-payload}}); and `splits` MUST NOT be present.
+  Servers MUST reject a confidential challenge that violates
+  any of these constraints. MUST NOT be `true` when `currency`
+  is `"sol"`.
+
+auditorElgamalPubkey
+: Conditionally REQUIRED. The base64-encoded
+  ({{encoding}} notwithstanding, this value is raw base64 of
+  the 32-byte key) twisted-ElGamal public key of the mint's
+  confidential-transfer auditor. MUST be present when
+  `confidential` is `true`; MUST be absent otherwise. Clients
+  MUST verify this value matches the `auditorElgamalPubkey`
+  recorded in the mint's `ConfidentialTransferMint` extension
+  on-chain, and MUST reject the challenge if it does not match
+  or if the mint configures no auditor. The client encrypts an
+  auditor handle of the transferred amount under this key so
+  the server (acting as, or delegated by, the auditor) can
+  verify the amount during settlement.
+
+recipientElgamalPubkey
+: OPTIONAL. The base64-encoded twisted-ElGamal public key of
+  the recipient's confidential token account, supplied as a
+  hint to save an RPC lookup. When present, clients MUST
+  verify it matches the recipient's on-chain confidential
+  account state before use. Regardless of this hint, clients
+  MUST confirm the recipient has a configured (and, on mints
+  that do not auto-approve, approved) confidential token
+  account; if it does not, the client MUST reject the
+  challenge, because confidential transfers cannot be received
+  by an unconfigured account ({{prerequisites}}). MUST be
+  absent when `confidential` is `false` or omitted.
+
 ### Native SOL Example
 
 ~~~json
@@ -493,6 +602,32 @@ This requests a total payment of 1.05 USDC. The platform
 receives 0.05 USDC and the primary recipient (seller)
 receives 1.00 USDC.
 
+### Confidential Transfer Example
+
+~~~json
+{
+  "amount": "1000000",
+  "currency": "HVWf8JmLoHs99Lw8Psf3fyqAtA4crWxCPkrmSdNjhNH3",
+  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "description": "Confidential API call",
+  "methodDetails": {
+    "network": "mainnet",
+    "decimals": 6,
+    "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "feePayer": true,
+    "feePayerKey": "9aE3Fg7HjKLmNpQr5TuVwXyZ2AbCdEf8GhIjKlMnOp1R",
+    "confidential": true,
+    "auditorElgamalPubkey": "GCJ+UreNo+YOlsWHCswYmm7+Phb90ionwJkBsIS4OUo="
+  }
+}
+~~~
+
+This requests a confidential transfer of 1 token (1,000,000
+base units). The on-chain transfer encrypts the amount; the
+server recovers and verifies it using the auditor ElGamal
+secret corresponding to `auditorElgamalPubkey`. See
+{{confidential}}.
+
 # Credential Schema
 
 The `Authorization` header carries a single base64url-encoded
@@ -514,9 +649,10 @@ source
 payload
 : REQUIRED. A JSON object containing the Solana-specific
   credential fields. The `type` field determines which
-  additional fields are present. Two payload types are
+  additional fields are present. Three payload types are
   defined: `"transaction"` (default) and `"signature"`
-  (fallback).
+  (fallback) for ordinary transfers, and `"bundle"` for
+  confidential transfers ({{bundle-payload}}).
 
 ## Transaction Payload — Pull Mode {#transaction-payload}
 
@@ -588,6 +724,64 @@ Example (decoded):
   "payload": {
     "type": "signature",
     "signature": "5UfDuX7hXbPjGUpTmt9PHRLsNGJe4dEny..."
+  }
+}
+~~~
+
+## Bundle Payload — Confidential Transfers {#bundle-payload}
+
+When `methodDetails.confidential` is `true`, the credential
+MUST use `type="bundle"`. A confidential transfer cannot be
+expressed as a single transaction: its validity, equality, and
+range proofs are too large to share a transaction with the
+transfer instruction, so they are first verified into proof
+context state accounts ({{confidential}}). The `transactions`
+field carries the ordered list of signed transactions that
+implement the transfer.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | REQUIRED | `"bundle"` |
+| `transactions` | array | REQUIRED | Ordered, non-empty array of base64-encoded serialized signed transactions. Each element MUST individually satisfy the 1232-byte transaction size limit. |
+
+The transactions MUST be ordered for sequential submission:
+each proof context state account MUST be created and its proof
+verified before the transaction that consumes it, and any
+context-account close instructions MUST appear no earlier than
+the transaction that last references the account. The final
+transaction in the array MUST contain the confidential
+`Transfer` (or `TransferWithFee`) instruction. The server
+submits the transactions in array order, waiting for the
+required commitment level on each before submitting the next
+(see {{confidential-verification}} and {{bundle-settlement}}).
+
+When `feePayer` is `true`, every transaction in the bundle
+MUST set the server's `feePayerKey` as fee payer, and the
+client signs each only as the transfer authority; the server
+co-signs each transaction before broadcast. The rent for proof
+context state accounts MUST be funded by the client, and each
+close instruction MUST return the reclaimed lamports to the
+client, so that fee sponsorship does not expose the server to
+rent drain (see {{confidential-rent}}).
+
+Example (decoded):
+
+~~~json
+{
+  "challenge": {
+    "id": "kM9xPqWvT2nJrHsY4aDfEb",
+    "realm": "api.example.com",
+    "method": "solana",
+    "intent": "charge",
+    "request": "eyJ...",
+    "expires": "2026-03-15T12:05:00Z"
+  },
+  "payload": {
+    "type": "bundle",
+    "transactions": [
+      "AQAAAA...proof-context-setup-tx...",
+      "AQAAAA...confidential-transfer-tx..."
+    ]
   }
 }
 ~~~
@@ -667,14 +861,141 @@ When acting as fee payer, servers:
   Clients MAY use either `type="transaction"` or
   `type="signature"` credentials.
 
+# Confidential Transfers {#confidential}
+
+When a challenge sets `methodDetails.confidential` to `true`,
+the charge MUST be settled as a Token-2022 Confidential
+Transfer {{CONFIDENTIAL-TRANSFER}}. The transferred amount is
+encrypted on-chain under twisted-ElGamal public keys and does
+not appear in cleartext in the transaction. This profile
+applies only to Token-2022 SPL tokens; it MUST NOT be used for
+native SOL.
+
+## Overview
+
+A confidential transfer differs from an ordinary
+`transferChecked` in three ways that this specification must
+accommodate:
+
+1. **The amount is encrypted.** The server cannot read the
+   transferred amount from parsed transaction data. Instead, it
+   recovers the amount from the auditor ciphertext handle using
+   the auditor ElGamal secret key (see {{confidential-auditor}}).
+
+2. **The transfer spans multiple transactions.** The transfer
+   requires a ciphertext-validity proof, a
+   ciphertext-ciphertext equality proof, and a range proof
+   (and, on mints with a confidential transfer fee, additional
+   fee proofs). These do not fit in a single transaction and
+   are verified into proof context state accounts first. The
+   credential therefore carries a transaction bundle
+   ({{bundle-payload}}).
+
+3. **Delivery is two-phase.** Funds received by a confidential
+   transfer land in the recipient's pending balance and become
+   spendable only after the recipient applies them. The receipt
+   reflects this (see {{confidential-receipt}}).
+
+## Prerequisites {#prerequisites}
+
+A confidential charge can only succeed when all of the
+following hold. Servers MUST NOT issue a confidential challenge,
+and clients MUST reject one, unless they are satisfied:
+
+- The mint identified by `currency` is owned by the Token-2022
+  Program and has the `ConfidentialTransferMint` extension
+  enabled.
+
+- The mint configures an auditor ElGamal public key
+  ({{confidential-auditor}}). A mint with no auditor MUST NOT be
+  used for the charge intent, because the server would be unable
+  to verify the paid amount.
+
+- The sender (client) holds a configured confidential token
+  account for the mint, with sufficient confidential available
+  balance to cover the amount.
+
+- The recipient holds a configured confidential token account
+  for the mint. On a mint that does not auto-approve new
+  accounts, that account MUST already be approved by the mint's
+  confidential-transfer authority. The server or client cannot
+  configure or approve the recipient's account on its behalf:
+  the recipient owns the ElGamal secret, and approval is the
+  mint authority's prerogative.
+
+Account configuration (`ConfigureAccount`), approval
+(`ApproveAccount`), deposit, and `ApplyPendingBalance` are
+account-lifecycle operations outside the scope of the charge
+intent. They are NOT carried in the charge credential and MUST
+NOT appear in the bundle's transactions; the bundle is limited
+to proof setup, the transfer, and proof-context cleanup
+({{confidential-verification}}).
+
+## Auditor Requirement {#confidential-auditor}
+
+Every confidential transfer in this profile MUST encrypt an
+auditor handle of the amount under the mint's auditor ElGamal
+public key, and the grouped validity proof MUST bind the
+sender, receiver, and auditor ciphertexts to the same amount.
+
+The verifying server MUST be configured with the auditor
+ElGamal secret key corresponding to the mint's
+`auditorElgamalPubkey`, or MUST delegate amount verification to
+a party that holds it. The server uses this key to decrypt the
+auditor handle and confirm the transferred amount equals the
+challenge `amount` ({{confidential-verification}}). Servers
+MUST store the auditor secret with protection at least
+equivalent to the fee payer signing key, and SHOULD isolate it
+from the request-handling path (see {{confidential-key}}).
+
+## Proof Context State Accounts
+
+The client builds the bundle so that, for each required proof,
+a proof context state account is created and the proof is
+verified into it by the ZK ElGamal Proof Program
+{{ZK-ELGAMAL-PROOF}} before the transfer instruction that
+references it. After the transfer, the bundle MUST close those
+context state accounts and return their rent to the client.
+
+Clients SHOULD minimize the number of transactions by batching
+proof verifications subject to the transaction size limit, but
+MUST NOT exceed it. Servers MUST treat the bundle as opaque in
+count but MUST verify its structure per
+{{confidential-verification}}.
+
+## Pending Balance and Delivery Semantics
+
+A confidential transfer credits the recipient's pending
+balance, not its available balance. The funds are delivered but
+not yet spendable; only the recipient can convert them with
+`ApplyPendingBalance`. A successful confidential charge
+therefore attests that the encrypted amount was transferred to
+the recipient's confidential account, not that it is
+immediately spendable by the recipient. The receipt signals
+this with `delivery: "pending"` ({{confidential-receipt}}).
+
+## Restrictions
+
+- `splits` MUST NOT be combined with `confidential`. Each
+  confidential split would require its own proof set and
+  transfer; this is out of scope for `draft-00`. Servers MUST
+  reject a challenge that sets both.
+
+- Confidential charges MUST use `type="bundle"`. `type="signature"`
+  and a bare `type="transaction"` MUST NOT be used, and servers
+  MUST reject them when `confidential` is `true`.
+
 # Verification Procedure {#verification}
 
 Upon receiving a request with a credential, the server MUST:
 
 1. Decode the base64url credential and parse the JSON.
 
-2. Verify that `payload.type` is present and is either
-   `"transaction"` or `"signature"`.
+2. Verify that `payload.type` is present and is one of
+   `"transaction"`, `"signature"`, or `"bundle"`. If the
+   challenge sets `confidential: true`, the type MUST be
+   `"bundle"`; otherwise it MUST be `"transaction"` or
+   `"signature"`.
 
 3. Look up the stored challenge using
    `credential.challenge.id`. If no matching challenge
@@ -690,6 +1011,7 @@ Upon receiving a request with a credential, the server MUST:
 6. Proceed with type-specific verification:
    - For `type="transaction"`: see {{transaction-verification}}.
    - For `type="signature"`: see {{signature-verification}}.
+   - For `type="bundle"`: see {{confidential-verification}}.
 
 ## Pull Mode Verification {#transaction-verification}
 
@@ -831,6 +1153,72 @@ not `"sol"`), the server MUST:
 If any required `transferChecked` instruction is missing,
 the server MUST reject the credential.
 
+## Confidential Transfer Verification {#confidential-verification}
+
+For credentials with `type="bundle"` (confidential charges),
+the server MUST:
+
+1. Decode each element of `payload.transactions` and
+   deserialize it. Reject the credential if any element is not
+   a valid transaction or exceeds the transaction size limit.
+
+2. Verify the bundle contains only expected instructions:
+   proof context state account creation, ZK ElGamal Proof
+   Program {{ZK-ELGAMAL-PROOF}} verification instructions, the
+   confidential `Transfer` or `TransferWithFee` instruction on
+   the Token-2022 Program, context-account close instructions,
+   and optionally memo and compute-budget instructions. Any
+   other instruction — in particular `ConfigureAccount`,
+   `ApproveAccount`, deposit, withdraw, or `ApplyPendingBalance`
+   — MUST cause rejection ({{prerequisites}}).
+
+3. Verify the confidential transfer instruction:
+   - operates on the mint identified by `currency`;
+   - uses, as its destination, the recipient's confidential
+     token account derived from the top-level `recipient` and
+     the mint;
+   - references the proof context state accounts created
+     earlier in the bundle;
+   - includes an auditor ciphertext handle encrypted under the
+     mint's auditor ElGamal public key, matching
+     `auditorElgamalPubkey`.
+
+4. If `feePayer` is `true`, verify every transaction sets the
+   server's `feePayerKey` as fee payer and that proof-context
+   rent is funded by, and returned to, the client
+   ({{confidential-rent}}); then add the server's fee payer
+   signature to each transaction.
+
+5. If `feePayer` is `true`, simulate each transaction before
+   broadcast and reject the credential on simulated failure.
+   Otherwise the server SHOULD simulate before broadcast.
+
+6. Submit the transactions in array order, waiting for at least
+   the `confirmed` commitment level on each before submitting
+   the next. If any transaction fails to land, the server MUST
+   reject the credential and MUST NOT return a success receipt,
+   even if earlier transactions in the bundle have landed.
+
+7. Recover the transferred amount by decrypting the auditor
+   ciphertext handle of the confirmed transfer using the
+   auditor ElGamal secret key, and verify it equals the
+   top-level `amount`. If the decrypted amount does not match,
+   the server MUST reject the credential.
+
+8. Record the signature of the final (transfer) transaction as
+   consumed to prevent replay ({{replay-protection}}).
+
+9. Return the resource with a Payment-Receipt header
+   ({{confidential-receipt}}).
+
+Because the proofs are verified on-chain by the ZK ElGamal
+Proof Program, the server does not re-verify the
+zero-knowledge proofs itself; it relies on the proofs having
+been accepted by the program as a precondition for the transfer
+instruction succeeding. The server's independent check is the
+auditor decryption in step 7, which binds the on-chain
+encrypted amount to the challenged `amount`.
+
 ## Replay Protection {#replay-protection}
 
 Servers MUST maintain a set of consumed transaction
@@ -949,6 +1337,60 @@ the transaction itself and presents the confirmed signature:
 7. Server confirms the payment matches the challenge.
 8. Server returns the resource with a Payment-Receipt.
 
+## Bundle Settlement (type="bundle") {#bundle-settlement}
+
+For `type="bundle"` credentials (confidential charges), the
+client submits an ordered set of signed transactions and the
+server settles them sequentially:
+
+~~~
+   Client                        Server                   Solana Network
+      |                             |                           |
+      |  (1) Authorization:         |                           |
+      |      Payment <credential>   |                           |
+      |      (signed tx bundle)     |                           |
+      |-------------------------->  |                           |
+      |                             |                           |
+      |                             |  (2) Verify bundle        |
+      |                             |      structure            |
+      |                             |                           |
+      |                             |  (3) For each tx in order:|
+      |                             |      co-sign (if fee      |
+      |                             |      payer), simulate,    |
+      |                             |      send, await confirm  |
+      |                             |------------------------>  |
+      |                             |<------------------------  |
+      |                             |                           |
+      |                             |  (4) getTransaction on    |
+      |                             |      final transfer       |
+      |                             |------------------------>  |
+      |                             |<------------------------  |
+      |                             |                           |
+      |                             |  (5) Decrypt auditor      |
+      |                             |      handle; verify       |
+      |                             |      amount == challenge  |
+      |                             |                           |
+      |  (6) 200 OK + Receipt       |                           |
+      |<--------------------------  |                           |
+      |                             |                           |
+~~~
+
+1. Client submits the credential containing the ordered
+   transaction bundle.
+2. Server verifies the bundle structure
+   ({{confidential-verification}}).
+3. Server co-signs (when fee payer), simulates, broadcasts, and
+   confirms each transaction in array order. If any transaction
+   fails to land, settlement aborts and no success receipt is
+   returned.
+4. Server fetches the confirmed final transfer transaction.
+5. Server decrypts the auditor handle and verifies the
+   transferred amount equals the challenge `amount`.
+6. Server records the final transfer signature as consumed and
+   returns the resource with a Payment-Receipt header whose
+   `reference` is that signature and whose `delivery` is
+   `"pending"` ({{confidential-receipt}}).
+
 ## Client Transaction Construction
 
 ### Native SOL
@@ -1057,6 +1499,33 @@ Example (decoded):
 }
 ~~~
 
+## Confidential Charge Receipt {#confidential-receipt}
+
+For a confidential charge (`type="bundle"`), the `reference`
+is the signature of the final confidential transfer
+transaction, and the receipt includes one additional field:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `delivery` | string | `"pending"` — the transferred amount was credited to the recipient's pending balance and becomes spendable only after the recipient applies it (see {{confidential}}). |
+
+The receipt MUST NOT include the cleartext transferred amount;
+the amount is encrypted on-chain, and the server learns it only
+through the auditor key for verification purposes.
+
+Example (decoded):
+
+~~~json
+{
+  "method": "solana",
+  "challengeId": "kM9xPqWvT2nJrHsY4aDfEb",
+  "reference": "5UfDuX7hXbPjGUpTmt9PHRLsNGJe4dEny...",
+  "status": "success",
+  "delivery": "pending",
+  "timestamp": "2026-03-10T21:00:00Z"
+}
+~~~
+
 # Error Responses
 
 When rejecting a credential, the server MUST return HTTP
@@ -1118,10 +1587,17 @@ Clients MUST verify the challenge before signing:
    and amounts — malicious servers could add splits
    to redirect funds
 6. `feePayerKey`, if present, is the expected server
+7. If `confidential` is `true`, `auditorElgamalPubkey`
+   matches the mint's on-chain `ConfidentialTransferMint`
+   auditor key, and the recipient has a configured (and,
+   where required, approved) confidential token account
 
 Malicious servers could request excessive amounts,
 direct payments to unexpected recipients, or add
-hidden splits.
+hidden splits. A malicious server could also supply an
+attacker-controlled `auditorElgamalPubkey`; verifying it
+against the on-chain mint configuration prevents the
+amount from being encrypted to an unintended auditor.
 
 ## RPC Trust
 
@@ -1228,6 +1704,60 @@ the signing effort. However, since the transaction
 is not broadcast by the client in pull mode, the
 practical risk is limited to a failed payment
 attempt that the client can retry.
+
+## Auditor Key Custody (Confidential) {#confidential-key}
+
+Confidential charge verification depends on the server holding
+the auditor ElGamal secret key. This key can decrypt the
+amount of every confidential transfer on the mint. It is a
+high-value secret distinct from the fee payer signing key and
+is not a key type natively supported by typical key-management
+services. Servers MUST protect it with at least the same rigor
+as the fee payer key, SHOULD isolate decryption behind a
+narrow internal interface rather than exposing the raw secret
+to request handlers, and SHOULD support rotation of the mint's
+auditor key. Compromise of the auditor secret defeats the
+confidentiality of all transfers on the mint, though it does
+not by itself permit theft of funds.
+
+## Proof Context Rent Drain (Confidential) {#confidential-rent}
+
+Proof context state accounts are rent-bearing. If the fee payer
+were also the rent payer, a malicious client could induce the
+server to fund context accounts and then withhold the closing
+transaction, draining the server's balance — analogous to the
+ATA rent drain in {{fee-payer-risks}}. Therefore, when the
+server is fee payer, the client MUST fund proof-context rent
+and the bundle MUST close every context account back to the
+client. Servers MUST verify this funding and close structure
+before co-signing, and MUST reject bundles that fund
+proof-context rent from the fee payer account.
+
+## Partial Bundle Settlement (Confidential)
+
+A confidential transfer is settled across multiple
+transactions. If settlement aborts after some transactions have
+landed, on-chain state may include created proof context
+accounts without a completed transfer. The server MUST NOT
+return a success receipt in this case. Because the close
+instructions return rent to the client, the financial impact of
+an aborted bundle falls on the client, not the server; clients
+SHOULD be prepared to reclaim rent from any context accounts
+left open by a failed attempt. Servers SHOULD bound the time
+and number of transactions they will settle for a single
+credential to limit resource exhaustion.
+
+## Amount Privacy Scope (Confidential)
+
+The confidential profile hides the transferred amount from
+public on-chain observers. It does not hide the amount from the
+challenge exchange itself: the `amount` field travels in the
+challenge and credential over TLS, and the server learns the
+amount both from the challenge and by decrypting the auditor
+handle. Confidentiality is therefore relative to third-party
+chain observers, not to the counterparties or the auditor.
+Sender and recipient account identities, and the fact that a
+confidential transfer occurred, remain visible on-chain.
 
 # IANA Considerations
 
@@ -1436,6 +1966,66 @@ The client builds a transaction with two transfers: 1,000,000
 base units to the primary recipient and 50,000 to the platform.
 The total paid remains 1,050,000 base units, matching the
 top-level `amount`.
+
+## Confidential Charge (Bundle)
+
+A 1-token confidential charge with server-sponsored fees. The
+amount is encrypted on-chain; the server verifies it via the
+auditor key.
+
+Decoded `request`:
+
+~~~json
+{
+  "amount": "1000000",
+  "currency": "HVWf8JmLoHs99Lw8Psf3fyqAtA4crWxCPkrmSdNjhNH3",
+  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "description": "Confidential API call",
+  "methodDetails": {
+    "network": "mainnet",
+    "decimals": 6,
+    "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "feePayer": true,
+    "feePayerKey": "9aE3Fg7HjKLmNpQr5TuVwXyZ2AbCdEf8GhIjKlMnOp1R",
+    "confidential": true,
+    "auditorElgamalPubkey": "GCJ+UreNo+YOlsWHCswYmm7+Phb90ionwJkBsIS4OUo="
+  }
+}
+~~~
+
+The client confirms the recipient has an approved confidential
+token account, verifies `auditorElgamalPubkey` against the
+mint, builds the proof-context-setup and confidential-transfer
+transactions (each with `feePayerKey` as fee payer and signed
+only by the transfer authority), and presents them as a bundle.
+
+Decoded credential:
+
+~~~json
+{
+  "challenge": { "..." : "echoed challenge" },
+  "payload": {
+    "type": "bundle",
+    "transactions": [
+      "<base64-encoded proof-context-setup tx>",
+      "<base64-encoded confidential-transfer tx>"
+    ]
+  }
+}
+~~~
+
+Decoded receipt:
+
+~~~json
+{
+  "method": "solana",
+  "challengeId": "kM9xPqWvT2nJrHsY4aDfEb",
+  "reference": "5UfDuX7hXbPjGUpTmt9PHRLsNGJe4dEny...",
+  "status": "success",
+  "delivery": "pending",
+  "timestamp": "2026-03-15T12:04:58Z"
+}
+~~~
 
 # Acknowledgements
 
