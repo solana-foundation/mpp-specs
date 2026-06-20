@@ -753,14 +753,33 @@ submits the transactions in array order, waiting for the
 required commitment level on each before submitting the next
 (see {{confidential-verification}} and {{bundle-settlement}}).
 
-When `feePayer` is `true`, every transaction in the bundle
-MUST set the server's `feePayerKey` as fee payer, and the
-client signs each only as the transfer authority; the server
-co-signs each transaction before broadcast. The rent for proof
-context state accounts MUST be funded by the client, and each
-close instruction MUST return the reclaimed lamports to the
-client, so that fee sponsorship does not expose the server to
-rent drain (see {{confidential-rent}}).
+Confidential charges are normally fee-sponsored (`feePayer:
+true`), because the paying client typically holds no SOL. Every
+transaction in the bundle MUST then set the server's
+`feePayerKey` as fee payer. The client signs each transaction
+only as the transfer authority and for the ephemeral proof /
+record account keypairs it generates; the server co-signs the
+fee-payer slot before broadcast.
+
+Because the client funds nothing, the server's `feePayerKey`
+MUST also be the rent funder for the proof context and record
+accounts and their authority (`context_state_authority` and the
+record-account authority), and every close instruction MUST
+return the reclaimed lamports to the server. The server does
+NOT shift rent to the client (it has no SOL); instead it
+protects itself from rent drain by (a) verifying each
+transaction contains only allow-listed, non-draining
+instructions before co-signing ({{confidential-verification}}),
+and (b) reclaiming rent from accounts orphaned by partial
+failures — which it can do because it is their authority
+(see {{confidential-rent}}).
+
+The server absorbs the (small) SOL transaction fee for a
+confidential charge: it cannot be recovered through a stablecoin
+`splits` entry (splits are forbidden for confidential charges,
+{{confidential}}), and the confidential `Transfer` is
+single-recipient. Servers SHOULD price this into their fee
+model rather than attempt on-chain recovery.
 
 Example (decoded):
 
@@ -953,13 +972,22 @@ a proof context state account is created and the proof is
 verified into it by the ZK ElGamal Proof Program
 {{ZK-ELGAMAL-PROOF}} before the transfer instruction that
 references it. After the transfer, the bundle MUST close those
-context state accounts and return their rent to the client.
+context state accounts and return their rent to whoever funded
+it — the server, under fee sponsorship ({{confidential-rent}}).
 
 Clients SHOULD minimize the number of transactions by batching
 proof verifications subject to the transaction size limit, but
 MUST NOT exceed it. Servers MUST treat the bundle as opaque in
 count but MUST verify its structure per
 {{confidential-verification}}.
+
+Before generating proofs (which is comparatively expensive),
+clients SHOULD pre-flight the transfer: confirm the mint has the
+Confidential Transfer extension, that the recipient's account is
+configured and allows confidential credits, and that the sender's
+decrypted available balance covers the amount. This turns the
+common failure modes into fast, local errors instead of a built
+bundle that fails on-chain.
 
 ## Pending Balance and Delivery Semantics
 
@@ -1182,10 +1210,14 @@ the server MUST:
      grouped validity proof).
 
 4. If `feePayer` is `true`, verify every transaction sets the
-   server's `feePayerKey` as fee payer and that proof-context
-   rent is funded by, and returned to, the client
+   server's `feePayerKey` as fee payer, that the only rent-funding
+   instructions are `create_account`s funded by the server and
+   assigning the new account to the ZK ElGamal Proof Program or
+   the record program, and that the proof/record accounts name
+   the server as their authority and rent-reclaim destination
    ({{confidential-rent}}); then add the server's fee payer
-   signature to each transaction.
+   signature to each transaction. The server MUST also bound the
+   number of transactions it will co-sign and submit per bundle.
 
 5. If `feePayer` is `true`, simulate each transaction before
    broadcast and reject the credential on simulated failure.
@@ -1726,30 +1758,49 @@ specification deliberately keeps them distinct.
 
 ## Proof Context Rent Drain (Confidential) {#confidential-rent}
 
-Proof context state accounts are rent-bearing. If the fee payer
-were also the rent payer, a malicious client could induce the
-server to fund context accounts and then withhold the closing
-transaction, draining the server's balance — analogous to the
-ATA rent drain in {{fee-payer-risks}}. Therefore, when the
-server is fee payer, the client MUST fund proof-context rent
-and the bundle MUST close every context account back to the
-client. Servers MUST verify this funding and close structure
-before co-signing, and MUST reject bundles that fund
-proof-context rent from the fee payer account.
+Proof context state accounts (and the range-proof record
+account) are rent-bearing. The paying client typically holds no
+SOL, so it cannot fund this rent — the server (fee payer) does.
+A naive design where the server funds rent but the client
+controls those accounts would let a malicious client withhold
+the closing transaction and strand the server's rent, analogous
+to the ATA rent drain in {{fee-payer-risks}}. This profile
+avoids that by making the server the **authority** of every
+proof/record account it funds: the bundle MUST create these
+accounts with the server's `feePayerKey` as funder and as
+`context_state_authority` (and record authority), and MUST
+close them back to the server within the bundle, so that net
+rent is approximately zero on success.
+
+The server protects itself two ways: (1) before co-signing, it
+verifies each transaction contains only allow-listed
+instructions and that every `create_account` is server-funded
+and assigns the new account to the ZK ElGamal Proof Program or
+the record program ({{confidential-verification}}); and (2)
+because it is the authority of any account a partial failure
+leaves open, it can reclaim that rent itself (see below).
+Servers MUST reject bundles whose `create_account` instructions
+name a funder other than the server or assign the account to any
+other program.
 
 ## Partial Bundle Settlement (Confidential)
 
 A confidential transfer is settled across multiple
 transactions. If settlement aborts after some transactions have
-landed, on-chain state may include created proof context
-accounts without a completed transfer. The server MUST NOT
-return a success receipt in this case. Because the close
-instructions return rent to the client, the financial impact of
-an aborted bundle falls on the client, not the server; clients
-SHOULD be prepared to reclaim rent from any context accounts
-left open by a failed attempt. Servers SHOULD bound the time
-and number of transactions they will settle for a single
-credential to limit resource exhaustion.
+landed, on-chain state may include created proof/record accounts
+without a completed transfer. The server MUST NOT return a
+success receipt in this case. Because the server funded the rent
+and is the authority of those accounts, the stranded rent is the
+server's to reclaim: servers SHOULD run a periodic sweep that
+closes proof/record accounts they own that were left open by
+aborted bundles, returning the rent to themselves. To avoid
+closing an account that belongs to a settlement still in flight
+(which creates and closes its accounts within one bounded
+settlement), the sweep SHOULD only close an account observed
+across two successive sweeps separated by more than the
+settlement window. Servers SHOULD also bound the time and number
+of transactions they will settle for a single credential to
+limit resource exhaustion.
 
 ## Amount Privacy Scope (Confidential)
 
@@ -1763,6 +1814,17 @@ therefore relative to third-party chain observers, not to the
 counterparties (nor any auditor the mint issuer configures).
 Sender and recipient account identities, and the fact that a
 confidential transfer occurred, remain visible on-chain.
+
+Metadata beyond the amount also stays visible — in particular,
+any memo. To avoid re-linking a confidential payment to a
+specific order, this profile does NOT write an order/`externalId`
+memo on-chain by default; servers SHOULD reconcile a confidential
+settlement by the globally-unique signature of its final
+(transfer) transaction, returned on the receipt, rather than an
+on-chain marker. A server that does include a memo MUST treat the
+resulting order-id linkage as an explicit privacy trade-off, and
+MUST verify any memo present in the bundle matches the value it
+issued in the challenge.
 
 # IANA Considerations
 
