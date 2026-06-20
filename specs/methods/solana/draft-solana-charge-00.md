@@ -99,9 +99,10 @@ This document also defines an optional confidential charge profile, in
 which the transferred amount is encrypted on-chain using the Token-2022
 Confidential Transfer extension {{CONFIDENTIAL-TRANSFER}}. Because a
 confidential transfer spans multiple transactions, this profile adds a
-third credential type, `type="bundle"`, and requires the mint to
-designate an auditor so the server can verify the paid amount without
-the amount appearing in cleartext on-chain.
+third credential type, `type="bundle"`. The server — the payment
+recipient — confirms the paid amount by decrypting the amount credited
+to its own confidential account with its own key, so the amount never
+appears in cleartext on-chain.
 
 --- middle
 
@@ -287,12 +288,13 @@ ElGamal Public Key
   public keys.
 
 Auditor
-: A party designated by the mint's `ConfidentialTransferMint`
-  configuration whose ElGamal public key is included in every
-  confidential transfer. The holder of the corresponding
-  ElGamal secret key can decrypt transferred amounts. In this
-  specification the verifying server acts as, or is delegated
-  by, the auditor.
+: A party optionally designated by the mint's
+  `ConfidentialTransferMint` configuration whose ElGamal public
+  key is included in every confidential transfer, letting the
+  holder of the corresponding secret decrypt transferred amounts.
+  The auditor is the mint **issuer's** compliance facility; the
+  charge server does NOT act as the auditor and plays no auditor
+  role in this specification.
 
 Pending Balance
 : The portion of a confidential account's balance that has
@@ -491,28 +493,25 @@ confidential
   ({{confidential}}), in which the transferred amount is
   encrypted on-chain. Defaults to `false` if omitted. When
   `true`: `currency` MUST be the mint address of a Token-2022
-  mint whose `ConfidentialTransferMint` extension is enabled
-  and configures an auditor; `tokenProgram`, if present, MUST
-  be the Token-2022 Program; `auditorElgamalPubkey` MUST be
-  present; the credential MUST use `type="bundle"`
+  mint whose `ConfidentialTransferMint` extension is enabled;
+  `tokenProgram`, if present, MUST be the Token-2022 Program;
+  the credential MUST use `type="bundle"`
   ({{bundle-payload}}); and `splits` MUST NOT be present.
   Servers MUST reject a confidential challenge that violates
   any of these constraints. MUST NOT be `true` when `currency`
   is `"sol"`.
 
 auditorElgamalPubkey
-: Conditionally REQUIRED. The base64-encoded
-  ({{encoding}} notwithstanding, this value is raw base64 of
-  the 32-byte key) twisted-ElGamal public key of the mint's
-  confidential-transfer auditor. MUST be present when
-  `confidential` is `true`; MUST be absent otherwise. Clients
-  MUST verify this value matches the `auditorElgamalPubkey`
-  recorded in the mint's `ConfidentialTransferMint` extension
-  on-chain, and MUST reject the challenge if it does not match
-  or if the mint configures no auditor. The client encrypts an
-  auditor handle of the transferred amount under this key so
-  the server (acting as, or delegated by, the auditor) can
-  verify the amount during settlement.
+: OPTIONAL. The base64-encoded twisted-ElGamal public key of
+  the mint's confidential-transfer auditor, when the mint
+  configures one. This is informational: it lets the client
+  confirm it is transmitting on the mint it expects. It is NOT
+  used for charge verification — the auditor is the mint
+  issuer's compliance facility, not the server's amount-check
+  mechanism (see {{confidential-amount}}). When present, clients
+  SHOULD verify it matches the on-chain
+  `ConfidentialTransferMint` auditor key. MUST be absent when
+  `confidential` is not `true`.
 
 recipientElgamalPubkey
 : OPTIONAL. The base64-encoded twisted-ElGamal public key of
@@ -616,17 +615,16 @@ receives 1.00 USDC.
     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
     "feePayer": true,
     "feePayerKey": "9aE3Fg7HjKLmNpQr5TuVwXyZ2AbCdEf8GhIjKlMnOp1R",
-    "confidential": true,
-    "auditorElgamalPubkey": "GCJ+UreNo+YOlsWHCswYmm7+Phb90ionwJkBsIS4OUo="
+    "confidential": true
   }
 }
 ~~~
 
 This requests a confidential transfer of 1 token (1,000,000
 base units). The on-chain transfer encrypts the amount; the
-server recovers and verifies it using the auditor ElGamal
-secret corresponding to `auditorElgamalPubkey`. See
-{{confidential}}.
+server, as the recipient, recovers and verifies it by
+decrypting the amount credited to its own confidential account
+with its own ElGamal key. See {{confidential}}.
 
 # Credential Schema
 
@@ -878,9 +876,10 @@ A confidential transfer differs from an ordinary
 accommodate:
 
 1. **The amount is encrypted.** The server cannot read the
-   transferred amount from parsed transaction data. Instead, it
-   recovers the amount from the auditor ciphertext handle using
-   the auditor ElGamal secret key (see {{confidential-auditor}}).
+   transferred amount from parsed transaction data. Instead, the
+   server — which is the payment recipient — confirms the amount
+   it received by decrypting its own confidential balance with
+   its own ElGamal key (see {{confidential-verification}}).
 
 2. **The transfer spans multiple transactions.** The transfer
    requires a ciphertext-validity proof, a
@@ -906,11 +905,6 @@ and clients MUST reject one, unless they are satisfied:
   Program and has the `ConfidentialTransferMint` extension
   enabled.
 
-- The mint configures an auditor ElGamal public key
-  ({{confidential-auditor}}). A mint with no auditor MUST NOT be
-  used for the charge intent, because the server would be unable
-  to verify the paid amount.
-
 - The sender (client) holds a configured confidential token
   account for the mint, with sufficient confidential available
   balance to cover the amount.
@@ -931,22 +925,26 @@ NOT appear in the bundle's transactions; the bundle is limited
 to proof setup, the transfer, and proof-context cleanup
 ({{confidential-verification}}).
 
-## Auditor Requirement {#confidential-auditor}
+## Amount Verification {#confidential-amount}
 
-Every confidential transfer in this profile MUST encrypt an
-auditor handle of the amount under the mint's auditor ElGamal
-public key, and the grouped validity proof MUST bind the
-sender, receiver, and auditor ciphertexts to the same amount.
+The server is the payment recipient, so it confirms the charged
+amount the same way any confidential-account holder reads an
+incoming payment: it decrypts the amount credited to its own
+confidential token account using its own ElGamal secret key. The
+grouped validity proof binds the receiver ciphertext to the same
+amount the sender debits, so this recipient-side value is the
+authoritative settled amount ({{confidential-verification}}).
+The server holds this key already — it is the key of the
+recipient account named by the charge — so no additional secret
+custody is required beyond the recipient wallet.
 
-The verifying server MUST be configured with the auditor
-ElGamal secret key corresponding to the mint's
-`auditorElgamalPubkey`, or MUST delegate amount verification to
-a party that holds it. The server uses this key to decrypt the
-auditor handle and confirm the transferred amount equals the
-challenge `amount` ({{confidential-verification}}). Servers
-MUST store the auditor secret with protection at least
-equivalent to the fee payer signing key, and SHOULD isolate it
-from the request-handling path (see {{confidential-key}}).
+The mint's auditor ElGamal key (the `auditorElgamalPubkey` in
+the `ConfidentialTransferMint` extension), when present, is a
+distinct facility owned by the mint **issuer** for compliance:
+it lets the issuer decrypt amounts across the mint. It is NOT
+used for, or required by, charge verification, and the server is
+not expected to hold the auditor secret. Servers MUST NOT treat
+the auditor handle as their amount-verification mechanism.
 
 ## Proof Context State Accounts
 
@@ -1179,9 +1177,9 @@ the server MUST:
      the mint;
    - references the proof context state accounts created
      earlier in the bundle;
-   - includes an auditor ciphertext handle encrypted under the
-     mint's auditor ElGamal public key, matching
-     `auditorElgamalPubkey`.
+   - credits the recipient's confidential account (the receiver
+     ciphertext is bound to the transferred amount by the
+     grouped validity proof).
 
 4. If `feePayer` is `true`, verify every transaction sets the
    server's `feePayerKey` as fee payer and that proof-context
@@ -1199,11 +1197,14 @@ the server MUST:
    reject the credential and MUST NOT return a success receipt,
    even if earlier transactions in the bundle have landed.
 
-7. Recover the transferred amount by decrypting the auditor
-   ciphertext handle of the confirmed transfer using the
-   auditor ElGamal secret key, and verify it equals the
+7. Confirm the received amount: as the payment recipient, the
+   server decrypts the amount credited to its own confidential
+   token account (the increase in its pending balance) using its
+   own recipient ElGamal secret key, and verifies it equals the
    top-level `amount`. If the decrypted amount does not match,
-   the server MUST reject the credential.
+   the server MUST reject the credential. This needs no auditor
+   key — the server already holds the recipient account's key
+   (see {{confidential-amount}}).
 
 8. Record the signature of the final (transfer) transaction as
    consumed to prevent replay ({{replay-protection}}).
@@ -1216,8 +1217,8 @@ Proof Program, the server does not re-verify the
 zero-knowledge proofs itself; it relies on the proofs having
 been accepted by the program as a precondition for the transfer
 instruction succeeding. The server's independent check is the
-auditor decryption in step 7, which binds the on-chain
-encrypted amount to the challenged `amount`.
+recipient-side decryption in step 7, which binds the amount
+actually credited to its account to the challenged `amount`.
 
 ## Replay Protection {#replay-protection}
 
@@ -1366,9 +1367,9 @@ server settles them sequentially:
       |                             |------------------------>  |
       |                             |<------------------------  |
       |                             |                           |
-      |                             |  (5) Decrypt auditor      |
-      |                             |      handle; verify       |
-      |                             |      amount == challenge  |
+      |                             |  (5) Decrypt own received |
+      |                             |      amount (recipient    |
+      |                             |      key); == challenge   |
       |                             |                           |
       |  (6) 200 OK + Receipt       |                           |
       |<--------------------------  |                           |
@@ -1384,8 +1385,9 @@ server settles them sequentially:
    fails to land, settlement aborts and no success receipt is
    returned.
 4. Server fetches the confirmed final transfer transaction.
-5. Server decrypts the auditor handle and verifies the
-   transferred amount equals the challenge `amount`.
+5. As the recipient, the server decrypts the amount credited to
+   its own confidential account with its own ElGamal key and
+   verifies it equals the challenge `amount`.
 6. Server records the final transfer signature as consumed and
    returns the resource with a Payment-Receipt header whose
    `reference` is that signature and whose `delivery` is
@@ -1511,7 +1513,8 @@ transaction, and the receipt includes one additional field:
 
 The receipt MUST NOT include the cleartext transferred amount;
 the amount is encrypted on-chain, and the server learns it only
-through the auditor key for verification purposes.
+by decrypting the amount credited to its own recipient account
+for verification purposes.
 
 Example (decoded):
 
@@ -1587,17 +1590,14 @@ Clients MUST verify the challenge before signing:
    and amounts — malicious servers could add splits
    to redirect funds
 6. `feePayerKey`, if present, is the expected server
-7. If `confidential` is `true`, `auditorElgamalPubkey`
-   matches the mint's on-chain `ConfidentialTransferMint`
-   auditor key, and the recipient has a configured (and,
-   where required, approved) confidential token account
+7. If `confidential` is `true`, the recipient has a configured
+   (and, where required, approved) confidential token account,
+   and `auditorElgamalPubkey`, if present, matches the mint's
+   on-chain `ConfidentialTransferMint` auditor key
 
 Malicious servers could request excessive amounts,
 direct payments to unexpected recipients, or add
-hidden splits. A malicious server could also supply an
-attacker-controlled `auditorElgamalPubkey`; verifying it
-against the on-chain mint configuration prevents the
-amount from being encrypted to an unintended auditor.
+hidden splits.
 
 ## RPC Trust
 
@@ -1705,20 +1705,24 @@ is not broadcast by the client in pull mode, the
 practical risk is limited to a failed payment
 attempt that the client can retry.
 
-## Auditor Key Custody (Confidential) {#confidential-key}
+## Recipient Key (Confidential) {#confidential-key}
 
-Confidential charge verification depends on the server holding
-the auditor ElGamal secret key. This key can decrypt the
-amount of every confidential transfer on the mint. It is a
-high-value secret distinct from the fee payer signing key and
-is not a key type natively supported by typical key-management
-services. Servers MUST protect it with at least the same rigor
-as the fee payer key, SHOULD isolate decryption behind a
-narrow internal interface rather than exposing the raw secret
-to request handlers, and SHOULD support rotation of the mint's
-auditor key. Compromise of the auditor secret defeats the
-confidentiality of all transfers on the mint, though it does
-not by itself permit theft of funds.
+Confidential charge verification uses the server's **recipient**
+ElGamal key — the key of the confidential token account named as
+the payee. The server derives this key from the recipient
+wallet it already controls, so verification introduces no new
+high-value secret beyond that wallet. Servers SHOULD derive it
+on demand rather than persist it separately. Compromise of the
+recipient key reveals the amounts that account received (the
+same exposure as losing the payee wallet); it does not by itself
+permit theft.
+
+The mint's **auditor** key, if the mint configures one, is a
+separate facility held by the mint **issuer** for compliance —
+it is not held by the server and plays no role in charge
+verification. Conflating the auditor with the payee would
+couple the payment provider to the stablecoin issuer; this
+specification deliberately keeps them distinct.
 
 ## Proof Context Rent Drain (Confidential) {#confidential-rent}
 
@@ -1753,9 +1757,10 @@ The confidential profile hides the transferred amount from
 public on-chain observers. It does not hide the amount from the
 challenge exchange itself: the `amount` field travels in the
 challenge and credential over TLS, and the server learns the
-amount both from the challenge and by decrypting the auditor
-handle. Confidentiality is therefore relative to third-party
-chain observers, not to the counterparties or the auditor.
+amount both from the challenge and by decrypting the amount
+credited to its own recipient account. Confidentiality is
+therefore relative to third-party chain observers, not to the
+counterparties (nor any auditor the mint issuer configures).
 Sender and recipient account identities, and the fact that a
 confidential transfer occurred, remain visible on-chain.
 
@@ -1970,8 +1975,8 @@ top-level `amount`.
 ## Confidential Charge (Bundle)
 
 A 1-token confidential charge with server-sponsored fees. The
-amount is encrypted on-chain; the server verifies it via the
-auditor key.
+amount is encrypted on-chain; the server, as recipient, verifies
+it by decrypting the amount credited to its own account.
 
 Decoded `request`:
 
@@ -1987,17 +1992,16 @@ Decoded `request`:
     "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
     "feePayer": true,
     "feePayerKey": "9aE3Fg7HjKLmNpQr5TuVwXyZ2AbCdEf8GhIjKlMnOp1R",
-    "confidential": true,
-    "auditorElgamalPubkey": "GCJ+UreNo+YOlsWHCswYmm7+Phb90ionwJkBsIS4OUo="
+    "confidential": true
   }
 }
 ~~~
 
 The client confirms the recipient has an approved confidential
-token account, verifies `auditorElgamalPubkey` against the
-mint, builds the proof-context-setup and confidential-transfer
-transactions (each with `feePayerKey` as fee payer and signed
-only by the transfer authority), and presents them as a bundle.
+token account, builds the proof-context-setup and
+confidential-transfer transactions (each with `feePayerKey` as
+fee payer and signed only by the transfer authority), and
+presents them as a bundle.
 
 Decoded credential:
 
