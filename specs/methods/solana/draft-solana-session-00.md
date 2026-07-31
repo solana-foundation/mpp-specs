@@ -76,7 +76,9 @@ Authentication Scheme {{I-D.ryan-httpauth-payment-01}}. Sessions
 enable metered, streaming, or repeated-use access to resources
 through off-chain vouchers backed by an on-chain escrow. The
 client opens a payment channel by depositing into a channel
-program, authorizes incremental spend via signed vouchers, and
+program. The client either authorizes incremental spend directly
+with signed vouchers or presents a reusable bearer proof while the
+operator signs the corresponding vouchers. The channel
 settles on-chain when the session closes.
 
 --- middle
@@ -207,6 +209,10 @@ authorizing cumulative spend, the server verifies the
 signature and serves the resource. No on-chain
 transaction occurs per request.
 
+The diagram shows client-signed vouchers. With operator-signed
+vouchers, the client presents the proof in {{session-bearer-proof}}
+and the operator meters service and signs each cumulative voucher.
+
 Step 11 typically bundles `settleAndSeal` and
 `distribute` in the same transaction so the
 merchant payout, payer refund, treasury sweep, and
@@ -229,6 +235,27 @@ payments. The "session" intent handles metered, streaming,
 or repeated-use payments within a single channel. Both
 intents share the same `solana` method identifier and
 encoding conventions.
+
+Like a zero-amount charge proof, the session bearer proof signs a
+domain-separated, challenge-bound message without moving funds. It is
+a reusable `session` proof and MUST NOT be processed as a `charge`.
+
+## Voucher Signer
+
+Two voucher-signing modes are defined:
+
+`client`
+: The client controls `authorizedSigner` and signs cumulative
+  vouchers. A valid voucher both authorizes payment and proves
+  possession of the channel's voucher-signing key.
+
+`operator`
+: The operator controls `authorizedSigner`. The client authenticates
+  metered requests with the reusable bearer proof defined in
+  {{session-bearer-proof}}, and the operator signs the
+  resulting cumulative vouchers.
+
+`client` is the default when the challenge omits `voucherSigner`.
 
 # Requirements Language
 
@@ -990,6 +1017,17 @@ feePayerKey
 : Conditionally REQUIRED. Base58-encoded public key
   of the server's fee payer account.
 
+voucherSigner
+: OPTIONAL. Party that signs cumulative vouchers. MUST be either
+  `client` or `operator`. Defaults to `client`.
+
+operator
+: Conditionally REQUIRED when `voucherSigner` is `operator`.
+  Base58-encoded Ed25519 public key that MUST equal
+  the channel's `authorizedSigner`. The operator signs cumulative
+  vouchers after authenticated requests are metered. This key MAY
+  equal `feePayerKey`, but the fields describe separate roles.
+
 minVoucherDelta
 : OPTIONAL. Minimum amount increase between accepted
   vouchers.
@@ -1057,7 +1095,7 @@ total = amount × units_consumed
 # Credential Schema
 
 The credential payload uses a discriminated union on
-the `action` field. Four actions are defined.
+the `action` field. Five actions are defined.
 
 These actions map to the abstract session lifecycle
 operations of {{I-D.payment-intent-session}} as
@@ -1066,9 +1104,62 @@ follows:
 | Abstract Operation | This Method's `action` |
 |--------------------|------------------------|
 | Open | `open` |
-| Use | `voucher` |
+| Use | `voucher` for `client`; `use` for `operator` |
 | Top-Up | `topUp` |
 | Close | `close` |
+
+## Session Bearer Proof {#session-bearer-proof}
+
+An operator-signed channel uses one payer-signed proof for `Open` and
+each subsequent `Use`. It authorizes access, not payment.
+
+The client derives `channelId` from the channel program and open
+parameters, then constructs this JCS {{RFC8785}} object:
+
+~~~json
+{
+  "channelId": "<base58 channel address>",
+  "domain": "mpp-session-auth-v1",
+  "payer": "<base58 payer public key>",
+  "sessionChallengeId": "<session challenge id>"
+}
+~~~
+
+The client signs the UTF-8 bytes of the JCS serialization with the
+Ed25519 private key corresponding to `payer`. The resulting
+`authentication` object has this shape:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | REQUIRED | The string `"proof"` |
+| `challengeId` | string | REQUIRED | Session challenge ID signed as `sessionChallengeId` |
+| `payer` | string | REQUIRED | Base58 Ed25519 public key that produced the proof |
+| `signature` | string | REQUIRED | Base58 encoding of the 64-byte Ed25519 signature |
+
+At open, the server MUST verify the session challenge and signature.
+The proof's `challengeId`, `channelId`, and `payer` MUST equal the
+opening challenge ID, declared and derived channel ID, and transaction
+payer. The verified challenge transitively binds its remaining policy.
+The server MUST bind the proof to exactly one channel; its verifier
+storage is implementation-defined.
+
+For a subsequent `use` action, the outer Payment credential MUST echo
+the same session challenge that was bound at open and MUST carry the
+same `authentication` field values. The server MUST verify the proof
+against the bound channel state. The challenge's `expires` auth-param
+limits opening the binding, not later use by the open channel. The
+channel idle timeout still applies.
+
+Repeated presentation is the expected bearer-proof behavior for the
+generic session `Use` operation. It MUST NOT be treated as fulfillment
+of a `charge` intent or rejected merely because it was previously
+presented. The proof remains valid while the channel is open, including
+when it temporarily has insufficient capacity. It becomes invalid when
+close begins or the channel otherwise becomes terminal.
+
+The `authentication` object cannot by itself open, fund, top up, or
+settle a channel. The open transaction and cumulative vouchers remain
+the payment proofs and retain their normal replay protections.
 
 ## Action: "open"
 
@@ -1089,6 +1180,7 @@ Opens a new payment channel.
 | `openSlot` | string | REQUIRED | Decimal u64 per-incarnation epoch encoded into the open instruction as `open_slot`; MUST satisfy the on-chain window rule of {{channel-closure}} when the transaction executes. Also a PDA derivation input: servers MUST include it when re-deriving and validating `channelId` |
 | `distributionSplits` | array | OPTIONAL | Splits preimage (see the challenge's `methodDetails.distributionSplits`); MUST byte-match the splits proposed in the 402 challenge |
 | `authorizationPolicy` | object | OPTIONAL | Voucher signer policy. When present, MUST be consistent with `authorizedSigner` |
+| `authentication` | object | Conditionally REQUIRED | Reusable proof from {{session-bearer-proof}}; REQUIRED for `operator` and MUST be absent for `client` |
 | `transaction` | string | REQUIRED | Base64-encoded (standard alphabet, padded) signed or partially signed transaction |
 | `capabilities` | object | OPTIONAL | Implementation-specific extensions |
 
@@ -1141,6 +1233,13 @@ PDA, escrow ATA, token program, or confirmed on-chain
 state disagree. See {{open-settlement}} for the
 required decoding and validation sequence.
 
+For `client`, the client controls `authorizedSigner`. For `operator`,
+`authorizedSigner` MUST equal the challenged `operator`,
+and the server MUST verify `authentication` before broadcasting the
+open transaction. The public transaction proves authorization of the
+deposit and operator settlement key; it does not authenticate later
+metered requests.
+
 Example `open` credential:
 
 ~~~json
@@ -1161,6 +1260,40 @@ Example `open` credential:
 }
 ~~~
 
+For `voucherSigner="operator"`, the relevant decoded `open` fields
+include the operator key and bearer proof:
+
+~~~json
+{
+  "action": "open",
+  "channelId": "C4HnVjA7WMUtSQzAv4G6T3qBjLwK5jM7PvE2nQ5sZ3kP",
+  "payer": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+  "authorizedSigner": "5fKb5cF22cFybZB1H4hLDydFhwoQy9JzKzRWaSbMkB6h",
+  "authentication": {
+    "type": "proof",
+    "challengeId": "c_8d0e3b5a9f2c1d4e",
+    "payer": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+    "signature": "4vJ9...base58 Ed25519 signature...Qd"
+  },
+  "transaction": "AQAB...base64..."
+}
+~~~
+
+Subsequent requests reuse the same `authentication` field:
+
+~~~json
+{
+  "action": "use",
+  "channelId": "C4HnVjA7WMUtSQzAv4G6T3qBjLwK5jM7PvE2nQ5sZ3kP",
+  "authentication": {
+    "type": "proof",
+    "challengeId": "c_8d0e3b5a9f2c1d4e",
+    "payer": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+    "signature": "4vJ9...base58 Ed25519 signature...Qd"
+  }
+}
+~~~
+
 ## Action: "voucher"
 
 Submits a new voucher authorizing additional spend.
@@ -1172,7 +1305,23 @@ Submits a new voucher authorizing additional spend.
 | `voucher` | object | REQUIRED | Signed voucher (see {{voucher-format}}) |
 
 This action is entirely off-chain. No transaction
-is broadcast.
+is broadcast. A `voucher` action directly authorizes service only for
+`client`. In `operator` mode, vouchers are operator-generated
+settlement artifacts and MUST NOT authenticate the caller.
+
+## Action: "use"
+
+Authenticates a metered request under an operator-signed channel.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `action` | string | REQUIRED | `"use"` |
+| `channelId` | string | REQUIRED | Existing operator-signed channel identifier |
+| `authentication` | object | REQUIRED | Reusable proof bound at open, as defined in {{session-bearer-proof}} |
+
+This action is valid only when `voucherSigner` is `operator`.
+After authenticating the request, the operator meters the delivered
+service and signs the corresponding cumulative voucher.
 
 ## Action: "topUp"
 
@@ -1193,7 +1342,8 @@ Requests cooperative close.
 |-------|------|----------|-------------|
 | `action` | string | REQUIRED | `"close"` |
 | `channelId` | string | REQUIRED | Existing channel identifier |
-| `voucher` | object | OPTIONAL | Final signed voucher (see {{voucher-format}}) |
+| `voucher` | object | Conditionally REQUIRED | REQUIRED for `client` and MUST be absent for `operator`; authenticates close and MAY advance settlement (see {{voucher-format}}) |
+| `authentication` | object | Conditionally REQUIRED | Reusable proof; REQUIRED for `operator` and MUST be absent for `client` |
 
 `Action: "close"` is a request for the server to
 broadcast `settleAndSeal` (optionally bundled
@@ -1205,15 +1355,13 @@ signature, which the server controls, and the
 server constructs and broadcasts the transaction
 itself.
 
-When `voucher` is present, it MUST strictly advance
-the on-chain watermark
-(`settled < voucher.cumulativeAmount`). A supplied
-voucher at or below the current on-chain `settled`
-is invalid and MUST cause `settleAndSeal` to
-reject; clients SHOULD omit `voucher` instead when
-no additional settlement is needed. When `voucher`
-is omitted, the server seals at the current
-on-chain `settled` watermark.
+For `operator`, the server MUST verify `authentication` against the
+channel before initiating cooperative close. For `client`, the server
+MUST verify the voucher signature and channel binding. A voucher with
+`cumulativeAmount > settled` advances settlement. A voucher at or below
+`settled` MUST equal the server's `acceptedCumulative`, authenticates
+close only, and MUST NOT be submitted as a settlement update. This
+permits authenticated close when no additional payment is due.
 
 See {{close-cooperative}} for the full settlement
 procedure, including how `settleAndSeal` and
@@ -1493,6 +1641,11 @@ This enables use cases like browser sessions where an
 ephemeral key signs vouchers without repeated wallet
 confirmations.
 
+That client-controlled delegated voucher key still uses a
+`voucherSigner` value of `client`. With `voucherSigner` set to
+`operator`, `authorizedSigner` is the operator and the client
+authenticates requests with the reusable payer proof.
+
 Implementations MAY additionally support delegated
 signers on other curves that Solana can verify
 through native programs, such as `secp256r1` for
@@ -1550,7 +1703,9 @@ each open channel:
 | `openSlot` | On-chain `Channel.openSlot` of the channel being metered; a PDA seed, needed to re-derive and validate `channelId` and to anticipate the reclaim gate |
 | `status` | `"open"` or `"closed"` |
 | `payer` | Payer public key |
+| `voucherSigner` | `client` or `operator` |
 | `authorizationPolicy` | Voucher signer policy |
+| `authentication` | For `operator`, secure state sufficient to verify the proof, its opening session challenge, payer, and channel |
 | `escrowedAmount` | Total deposited (from on-chain `Channel.deposit`) |
 | `acceptedCumulative` | Highest voucher amount accepted |
 | `highestVoucher` | Full highest accepted `SignedVoucher`, retained for on-chain settlement |
@@ -1579,10 +1734,17 @@ one metering ledger across clusters. A server SHOULD
 verify the resolved channel matches the challenge's
 `methodDetails.network` before metering.
 
-The available off-chain balance is computed as:
+For `client`, the available off-chain balance is:
 
 ~~~
 available = acceptedCumulative - spentAmount
+~~~
+
+For `operator`, the operator creates authorization as service is
+metered, so the available capacity is:
+
+~~~
+available = escrowedAmount - acceptedCumulative
 ~~~
 
 The on-chain settlement watermark is distinct:
@@ -1616,14 +1778,29 @@ keeps unvetted mints out of channels.
 
 For each request on an open channel:
 
-1. Compute `cost` from the challenged `amount`,
+1. Authenticate `client` mode with a valid voucher, or `operator`
+   mode with a valid `use` proof.
+2. Compute `cost` from the challenged `amount`,
    `unitType`, and any implementation-specific metering
    policy.
-2. Compute `available = acceptedCumulative - spentAmount`.
-3. If `available < cost`: return 402 requesting a
-   new voucher or topUp.
-4. Persist `spentAmount += cost` BEFORE serving.
-5. Serve the resource with a receipt.
+3. Compute `available` using the formula for the channel's mode.
+4. If `available < cost`, return 402 requesting a new voucher or
+   `topUp`, as applicable.
+5. For `client`, persist `spentAmount += cost`. For `operator`, sign a
+   voucher for `acceptedCumulative + cost` and
+   atomically persist that voucher, the new `acceptedCumulative`, and
+   `spentAmount += cost`.
+6. Persist the applicable transition atomically before releasing the
+   corresponding response bytes.
+7. Serve the resource with a receipt.
+
+When cost is known only after generation begins, an operator-mode server
+MUST reserve sufficient channel capacity before delivery and persist
+the operator-signed voucher before releasing the response bytes whose
+cost it authorizes. Failed delivery MUST release unused reservations.
+Amounts already covered by a persisted voucher and released response
+bytes remain committed; unused reserved capacity MUST NOT advance the
+voucher.
 
 ## Partial Settlement
 
@@ -1660,8 +1837,8 @@ or machine crashes.
 
 ## Concurrency and Idempotency
 
-Servers MUST serialize voucher acceptance and debit
-processing per channel (`channelId`; the address is
+Servers MUST serialize proof verification, voucher creation or
+acceptance, and debit processing per channel (`channelId`; the address is
 per-incarnation by construction). Voucher updates
 arriving on different HTTP connections or multiplexed
 streams MUST be processed atomically with respect to:
@@ -1687,6 +1864,11 @@ metered HTTP requests. Servers SHOULD cache
 `(challengeId, idempotencyKey)` pairs and MUST NOT
 increment `spentAmount` twice for a duplicate
 idempotent request.
+
+Repeated presentation of a session bearer proof is expected and is not, by
+itself, a duplicate request. Idempotency keys and atomic channel
+accounting provide request-level replay protection independently of the
+bearer proof.
 
 # Settlement Procedure
 
@@ -1777,9 +1959,14 @@ idempotent request.
 11. Reject any disagreement between the challenge,
    credential payload, decoded transaction, derived
    PDA, escrow ATA, or token program.
-12. If fee payer mode: co-sign and broadcast.
+12. Verify `voucherSigner`. For `operator`, verify the
+   reusable proof as defined in
+   {{session-bearer-proof}} and verify that decoded
+   `authorizedSigner` equals the challenged `operator`. For
+   `client`, reject an `authentication` field.
+13. If fee payer mode: co-sign and broadcast.
    Otherwise: broadcast as-is.
-13. Verify channel state on-chain after confirmation:
+14. Verify channel state on-chain after confirmation:
    - payer matches transaction signer;
    - payee matches the challenged recipient;
    - mint matches the challenge currency;
@@ -1793,12 +1980,12 @@ idempotent request.
      that funded the channel rent;
    - channel is not sealed; and
    - `closureStartedAt` is `0`.
-14. Create server-side channel state keyed by
+15. Create server-side channel state keyed by
    `channelId` (per-incarnation by construction, since
-   `openSlot` is a PDA seed). Persist the effective idle
-   timeout and initialize `lastActivityAt` as part of
-   the same state transition.
-15. Return 200 with receipt.
+   `openSlot` is a PDA seed). Persist the effective idle timeout,
+   voucher signer and any session proof verifier.
+   Initialize `lastActivityAt` as part of the same state transition.
+16. Return 200 with receipt.
 
 ## Resume
 
@@ -1824,7 +2011,15 @@ shares one cumulative ledger across challenges,
 keyed by `channelId`, so a single cumulative voucher
 cannot be reused to buy multiple responses.
 
+An operator-signed channel MUST NOT resume if its durable proof binding is
+missing or inconsistent with its payer, original session
+challenge, or channel ID. Public transaction or account data MUST NOT
+be used to reconstruct that binding.
+
 ## Voucher Update (No Settlement)
+
+This procedure directly authorizes service only for
+`client`.
 
 1. Verify voucher signature and monotonicity.
 2. Verify the channel is open and has no pending
@@ -1854,16 +2049,17 @@ is requested, the paths forward are
 
 ## Close (Cooperative) {#close-cooperative}
 
-1. If a final voucher is provided, verify the
-   `SignedVoucher` against the active channel:
-   `voucher.channelId` equals the payload `channelId`
-   (itself validated by re-derivation over the open
-   parameters, including `openSlot`), `signer` equals
-   the channel `authorizedSigner`, the Ed25519
-   signature verifies over the Borsh payload,
-   freshness checks pass, and
-   `settled < cumulativeAmount <= deposit`.
-2. Build and immediately broadcast
+1. Authenticate close according to `voucherSigner`. For `client`,
+   verify the required voucher's channel, signer, signature, freshness,
+   and `cumulativeAmount <= deposit`. For `operator`, verify the bound
+   session proof.
+2. Select the settlement voucher. In `client` mode, use the supplied
+   voucher only when `cumulativeAmount > settled`; otherwise treat it
+   only as close authentication after verifying it equals
+   `acceptedCumulative`. In `operator` mode, use the stored
+   highest voucher when it advances `settled`. If no voucher advances
+   settlement, seal at the current on-chain watermark.
+3. Build and immediately broadcast
    `settleAndSeal` bundled with `distribute` in
    the same transaction, so the merchant-side payout,
    payer refund, treasury sweep, and escrow-ATA
@@ -1879,11 +2075,11 @@ is requested, the paths forward are
    `distribute` carries many recipients may require a
    version-0 transaction with an address lookup
    table.
-3. Mark the channel as `"closed"` in server-side
+4. Mark the channel as `"closed"` in server-side
    state.
-4. Persist final `settledOnChain` and terminal
+5. Persist final `settledOnChain` and terminal
    accounting state after confirmation.
-5. Return 200 with receipt containing `txHash` and
+6. Return 200 with receipt containing `txHash` and
    (if `distribute` ran) the refunded amount.
 
 For deployments whose `payee` is a PDA, the server MUST
@@ -2079,6 +2275,9 @@ payment. This allows session payment to compose with
 arbitrary protected endpoints without a dedicated
 payment control plane route.
 
+Operator-mode clients submit `use` credentials to the same URI with
+`method="solana"` and `intent="session"`.
+
 Clients MAY use `HEAD` for voucher-only or top-up-only
 requests when no response body is required. Servers
 SHOULD support such requests where practical.
@@ -2107,6 +2306,31 @@ challenge conveys the currently supported options.
 ## Transport Security
 
 All communication MUST use TLS 1.2 or higher.
+
+## Session Bearer Proofs
+
+The channel-open transaction and account state are public. They prove
+that the payer authorized the deposit and settlement signer, but not
+that a later HTTP caller is the payer. Servers MUST NOT authenticate a
+metered request using a transaction signature, serialized open
+transaction, open credential, channel ID, or another value recoverable
+from the ledger.
+
+The session proof is not placed on-chain, but it is a bearer
+credential: anyone who obtains it can request service against the
+channel's remaining capacity. Clients and servers MUST keep it
+confidential, transmit it only over TLS, and redact the proof,
+signature, and Authorization header from logs and traces. Servers MUST
+reject it once close begins or the channel becomes terminal. Temporary
+insufficient capacity does not invalidate the proof; a successful
+`topUp` can restore available capacity.
+
+The proof is bound to one channel and opening session challenge, but
+not to an individual HTTP method, target, body, or idempotency key.
+Servers MUST enforce idempotency and atomic capacity reservation
+independently. Applications requiring sender-constrained or per-request
+integrity MAY define an extension that signs request context with a
+client-held key.
 
 ## Escrow Safety {#escrow-safety}
 
@@ -2276,8 +2500,8 @@ metered service after `closureStartedAt` is set.
 
 ## Delegated Signer Risks
 
-If delegated signing is used, a compromised delegated
-key can authorize spend up to the delegation's limit.
+If client-controlled delegated voucher signing is used, a compromised
+delegated key can authorize spend up to the delegation's limit.
 The `authorizedSigner` is bound into the PDA seed set
 at open time and cannot be changed without closing and
 reopening the channel. If a delegated signing key is
@@ -2289,6 +2513,12 @@ Implementations MUST treat delegated keys as
 short-lived, single-session credentials with TTLs on
 the order of minutes to bound exposure in the event
 of a key compromise.
+
+With `voucherSigner` set to `operator`, compromise of `operator` permits
+voucher creation up to the deposit cap. Theft of the reusable proof
+does not permit direct voucher creation, but lets the thief request
+service that the operator can charge to the channel. Replacing a
+compromised proof requires closing and reopening the channel.
 
 ## Channel Program Trust
 
