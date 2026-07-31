@@ -1,8 +1,8 @@
 ---
 title: Solana Session Intent for HTTP Payment Authentication
 abbrev: Solana Session
-docname: draft-solana-session-00
-version: 00
+docname: draft-solana-session-01
+version: "01"
 category: info
 ipr: noModificationTrust200902
 submissiontype: independent
@@ -45,6 +45,12 @@ normative:
       - name: Jake Moxey
       - name: Tom Meagher
     date: 2026-06
+  I-D.solana-charge:
+    title: Solana Charge Intent for HTTP Payment Authentication
+    target: https://paymentauth.org/draft-solana-charge-01.html
+    author:
+      - name: Ludo Galabru
+    date: 2026
 
 informative:
   SOLANA-DOCS:
@@ -209,6 +215,33 @@ payments. The "session" intent handles metered, streaming,
 or repeated-use payments within a single channel. Both
 intents share the same `solana` method identifier and
 encoding conventions.
+
+### Delegated Session Bootstrap {#delegated-session-bootstrap}
+
+A server can need the payer's identity before it can determine whether
+the payer already has a reusable channel or construct a delegated
+session challenge. In that case, the server MAY perform a bootstrap
+preflight using a zero-amount `solana` `charge` challenge as defined by
+{{I-D.solana-charge}}.
+
+The client answers the preflight with a `type="proof"` credential. After
+verifying the proof, the server obtains the payer public key from the
+credential's `source` DID and MAY use it to resolve an existing channel
+or construct the subsequent `session` challenge. The server MUST bind
+the resolved session to the same Solana network and MUST verify that the
+proven public key is the payer or token-account owner recorded by the
+resolved on-chain state.
+
+The zero-amount proof establishes payer identity only. It does not open
+a channel, delegate tokens, authorize voucher settlement, or replace any
+signature required by the session open. For a new delegated session, the
+client MUST still sign the channel-open or token-delegation transaction
+defined by this specification. When delegated settlement is selected,
+the resulting channel's `authorizedSigner` is the operator, while the
+funding transaction continues to prove the payer's authorization.
+
+A server that already knows the payer identity, or that does not need it
+to construct the session challenge, MAY omit this preflight.
 
 # Requirements Language
 

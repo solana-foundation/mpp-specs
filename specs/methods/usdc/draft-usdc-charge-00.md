@@ -45,7 +45,7 @@ normative:
     target: https://paymentauth.org/draft-evm-charge-00.html
   I-D.solana-charge:
     title: Solana Charge Intent for HTTP Payment Authentication
-    target: https://paymentauth.org/draft-solana-charge-00.html
+    target: https://paymentauth.org/draft-solana-charge-01.html
   CAIP-2:
     title: Chain Agnostic Improvement Proposal 2
     target: https://chainagnostic.org/CAIPs/caip-2

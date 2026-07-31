@@ -1,8 +1,8 @@
 ---
 title: Solana Charge Intent for HTTP Payment Authentication
 abbrev: Solana Charge
-docname: draft-solana-charge-00
-version: 00
+docname: draft-solana-charge-01
+version: "01"
 category: info
 ipr: noModificationTrust200902
 submissiontype: independent
@@ -73,15 +73,17 @@ informative:
 
 This document defines the "charge" intent for the "solana" payment
 method within the Payment HTTP Authentication Scheme
-{{I-D.httpauth-payment}}. The client constructs and signs a native SOL
-or SPL token transfer on the Solana blockchain; the server verifies the
-payment and presents the transaction signature as proof of payment.
+{{I-D.httpauth-payment}}. For non-zero charges, the client constructs
+and signs a native SOL or SPL token transfer on the Solana blockchain.
+For zero-amount charges, the client signs an off-chain proof bound to
+the challenge identifier.
 
-Two credential types are supported: `type="transaction"` (default),
+Three credential types are supported: `type="transaction"` (default),
 where the client sends the signed transaction to the server for
 broadcast, and `type="signature"` (fallback), where the client
 broadcasts the transaction itself and presents the on-chain transaction
-signature for server verification.
+signature for server verification. Zero-amount charges use
+`type="proof"` and require no on-chain transaction.
 
 --- middle
 
@@ -251,12 +253,13 @@ It MUST be lowercase.
 # Intent: "charge"
 
 The "charge" intent represents a one-time payment gating access
-to a resource. The client builds and signs a Solana transfer
-transaction, then either sends the signed transaction bytes to
-the server for broadcast (`type="transaction"`) or broadcasts the
-transaction itself and sends the on-chain signature
-(`type="signature"`). The server verifies the transfer details
-and returns a receipt.
+to a resource. For a non-zero amount, the client builds and signs
+a Solana transfer transaction, then either sends the signed transaction
+bytes to the server for broadcast (`type="transaction"`) or broadcasts
+the transaction itself and sends the on-chain signature
+(`type="signature"`). For an amount of zero, the client signs an
+off-chain, challenge-bound proof (`type="proof"`). The server verifies
+the transfer or proof and returns a receipt.
 
 # Encoding Conventions {#encoding}
 
@@ -290,8 +293,10 @@ amount
   decimal string. For native SOL, the amount is in lamports.
   For SPL tokens, the amount is in the token's smallest unit
   (e.g., for USDC with 6 decimals, "1000000" represents
-  1 USDC). The value MUST be a positive integer that fits
+  1 USDC). The value MUST be a non-negative integer that fits
   in a 64-bit unsigned integer (max 18,446,744,073,709,551,615).
+  A value of `"0"` uses the proof flow defined in {{proof-payload}}
+  and MUST NOT create an on-chain transfer.
 
 currency
 : REQUIRED. For native SOL, MUST be the lowercase
@@ -549,16 +554,19 @@ challenge
   issued.
 
 source
-: OPTIONAL. A payer identifier string, as defined by
-  {{I-D.httpauth-payment}}. Solana implementations MAY
-  use the payer's base58-encoded public key or a DID.
+: OPTIONAL for transaction and signature credentials, and REQUIRED
+  for proof credentials. It is a payer identifier string as defined by
+  {{I-D.httpauth-payment}}. Proof credentials MUST use
+  `did:pkh:solana:<network>:<address>`, where `network` is the challenge
+  `methodDetails.network` (or `mainnet` when omitted) and `address` is
+  the signer's base58-encoded Ed25519 public key.
 
 payload
 : REQUIRED. A JSON object containing the Solana-specific
   credential fields. The `type` field determines which
-  additional fields are present. Two payload types are
-  defined: `"transaction"` (default) and `"signature"`
-  (fallback).
+  additional fields are present. Three payload types are
+  defined: `"transaction"` (default), `"signature"`
+  (fallback), and `"proof"` (zero-amount charges).
 
 ## Transaction Payload — Pull Mode {#transaction-payload}
 
@@ -647,6 +655,61 @@ The `type="signature"` credential has the following limitations:
 - The server cannot modify or enhance the transaction (e.g.,
   add priority fees, adjust compute units, or retry with
   different parameters).
+
+## Proof Payload — Zero-Amount Charge {#proof-payload}
+
+When `amount` is `"0"`, no on-chain transfer is required. The client
+MUST use a `type="proof"` credential and MUST NOT use a transaction or
+signature credential. Conversely, clients MUST NOT use `type="proof"`
+when `amount` is non-zero.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | REQUIRED | `"proof"` |
+| `signature` | string | REQUIRED | Base58-encoded Ed25519 signature |
+
+The client signs the UTF-8 encoding of the following string, with the
+line feed represented by a single `0x0A` byte and no trailing line feed:
+
+~~~
+MPP charge proof v1:
+Version: 1
+Network: <network>
+Challenge ID: <challenge.id>
+~~~
+
+The challenge identifier MUST be copied exactly from the issued
+challenge. `network` MUST equal `methodDetails.network`, or `mainnet`
+when that field is omitted. The first line and version domain-separate
+this signature from transaction signatures and other uses of Solana
+`signMessage`, while the network line prevents cross-cluster replay.
+
+The credential `source` MUST be present and MUST identify the signer as
+`did:pkh:solana:<network>:<address>`. Zero-amount requests MUST NOT
+contain non-empty `methodDetails.splits` and MUST NOT set
+`methodDetails.confidential` to `true`. Transaction-only method details,
+including `recentBlockhash` and fee-payer settings, do not apply to proof
+credentials.
+
+Example (decoded):
+
+~~~json
+{
+  "challenge": {
+    "id": "kM9xPqWvT2nJrHsY4aDfEb",
+    "realm": "api.example.com",
+    "method": "solana",
+    "intent": "charge",
+    "request": "eyJ...",
+    "expires": "2026-03-15T12:05:00Z"
+  },
+  "payload": {
+    "type": "proof",
+    "signature": "5UfDuX7hXbPjGUpTmt9PHRLsNGJe4dEny..."
+  },
+  "source": "did:pkh:solana:mainnet:<base58-public-key>"
+}
+~~~
 
 # Fee Sponsorship {#fee-sponsorship}
 
@@ -762,8 +825,8 @@ Upon receiving a request with a credential, the server MUST:
 
 1. Decode the base64url credential and parse the JSON.
 
-2. Verify that `payload.type` is present and is either
-   `"transaction"` or `"signature"`.
+2. Verify that `payload.type` is present and is one of
+   `"transaction"`, `"signature"`, or `"proof"`.
 
 3. Look up the stored challenge using
    `credential.challenge.id`. If no matching challenge
@@ -772,13 +835,36 @@ Upon receiving a request with a credential, the server MUST:
 4. Verify that all fields in `credential.challenge`
    exactly match the stored challenge auth-params.
 
-5. If `payload.type` is `"signature"` and the challenge
+5. Verify the payload type matches the amount: `amount="0"` MUST use
+   `type="proof"`, and a non-zero amount MUST NOT use `type="proof"`.
+
+6. If `payload.type` is `"signature"` and the challenge
    specifies `feePayer: true`, reject the request (see
    {{signature-limitations}}).
 
-6. Proceed with type-specific verification:
+7. Proceed with type-specific verification:
    - For `type="transaction"`: see {{transaction-verification}}.
    - For `type="signature"`: see {{signature-verification}}.
+   - For `type="proof"`: see {{proof-verification}}.
+
+## Proof Verification {#proof-verification}
+
+For credentials with `type="proof"`, the server MUST:
+
+1. Verify `amount` is `"0"`, `splits` is absent or empty, and
+   `confidential` is not `true`.
+2. Verify `credential.source` parses as
+   `did:pkh:solana:<network>:<address>`.
+3. Verify `network` matches `methodDetails.network`, defaulting both to
+   `mainnet` when the method detail is omitted.
+4. Base58-decode `address` as a 32-byte Ed25519 public key and
+   `payload.signature` as a 64-byte Ed25519 signature.
+5. Verify the signature over the exact message defined in
+   {{proof-payload}} using that public key.
+
+Proof verification MUST NOT submit a transaction or require a Solana RPC
+request. Upon success, the receipt `reference` MUST be the challenge
+`id`, since there is no transaction signature.
 
 ## Pull Mode Verification {#transaction-verification}
 
@@ -1157,7 +1243,7 @@ The receipt payload for Solana charge:
 |-------|------|-------------|
 | `method` | string | `"solana"` |
 | `challengeId` | string | The challenge `id` from `WWW-Authenticate` |
-| `reference` | string | The transaction signature (base58-encoded) |
+| `reference` | string | The transaction signature (base58-encoded), or the challenge `id` for a zero-amount proof |
 | `status` | string | `"success"` |
 | `timestamp` | string | {{RFC3339}} verification time |
 
