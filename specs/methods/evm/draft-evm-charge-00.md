@@ -12,15 +12,15 @@ author:
   - name: Brett DiNovi
     ins: B. DiNovi
     email: bread@megaeth.com
-    organization: MegaETH Labs
+    org: MegaETH Labs
   - name: Conner Swenberg
     ins: C. Swenberg
     email: conner.swenberg@coinbase.com
-    organization: Coinbase
+    org: Coinbase
   - name: Kyle Scott
     ins: K. Scott
     email: kscott@monad.foundation
-    organization: Monad Foundation
+    org: Monad Foundation
 
 normative:
   RFC2119:
@@ -40,7 +40,7 @@ normative:
     date: 2026
   I-D.httpauth-payment:
     title: "The 'Payment' HTTP Authentication Scheme"
-    target: https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/
+    target: https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/
     author:
       - name: Jake Moxey
     date: 2026-01
@@ -452,14 +452,16 @@ The Permit2 witness mechanism provides cryptographic
 binding between the payment authorization and the
 challenge. When `externalId` is present in the challenge
 request, the client MUST include it in the EIP-712
-witness struct. The server MUST verify the witness
-matches before submitting the transaction.
+witness struct. When `externalId` is absent from the challenge request,
+`PaymentWitness.externalId` is the empty string (`""`). The server MUST
+verify the witness matches before submitting the transaction.
 
 The witness type is defined as:
 
 ~~~solidity
 struct PaymentWitness {
     bytes32 challengeHash;
+    string externalId;
 }
 ~~~
 
@@ -478,7 +480,7 @@ against a different challenge, even if the payment
 parameters are identical.
 
 The witness type string for EIP-712 is:
-`"PaymentWitness witness)PaymentWitness(bytes32 challengeHash)TokenPermissions(address token,uint256 amount)"`
+`"PaymentWitness witness)PaymentWitness(bytes32 challengeHash, string externalId)TokenPermissions(address token,uint256 amount)"`
 
 This specification defines that witness schema directly for
 challenge binding. Implementations MUST use the exact type
