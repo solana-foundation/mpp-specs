@@ -271,6 +271,11 @@ Grace Period
   during which the server can still settle outstanding
   vouchers before funds are returned to the client.
 
+Idle Timeout
+: The maximum period without channel activity before
+  the server initiates cooperative close. Channel
+  activity is defined in {{idle-timeout}}.
+
 # Intent Identifier
 
 The intent identifier for this specification is "session".
@@ -990,7 +995,32 @@ minVoucherDelta
   vouchers.
 
 ttlSeconds
-: OPTIONAL. Suggested session duration in seconds.
+: OPTIONAL. Suggested session duration in seconds. This
+  field does not change the idle-timeout negotiation
+  defined in {{idle-timeout}}.
+
+idleTimeoutOptionsSeconds
+: OPTIONAL. Server-supported inactivity thresholds for
+  a new channel, in seconds. When present, this MUST be
+  a non-empty, strictly increasing array of distinct
+  integers from 1 through 2592000, inclusive (1 second
+  through 30 days). When omitted, the server selects the
+  effective timeout at its discretion and the client
+  cannot request a specific value. For example, a server can
+  advertise
+  `[30, 600, 86400]`. The client selects one option in
+  its `open` credential or lets the server choose. This
+  field MUST be absent when `channelId` is present. See
+  {{idle-timeout}}.
+
+idleTimeoutSeconds
+: Conditionally REQUIRED when `channelId` is present.
+  Effective negotiated threshold for the resumed
+  channel, as an integer from 1 through 2592000 seconds,
+  inclusive (1 second through 30 days). This field MUST
+  be absent from a challenge for a new channel. The value
+  is server-side state and is not stored in the on-chain
+  channel account.
 
 gracePeriodSeconds
 : Conditionally REQUIRED. Grace period for forced close
@@ -1055,6 +1085,7 @@ Opens a new payment channel.
 | `salt` | string | REQUIRED | Decimal u64 PDA disambiguator |
 | `depositAmount` | string | REQUIRED | Initial deposit in base units; MUST equal the decoded `open` deposit and satisfy `depositAmount >= minimumDeposit` (when the challenge sets one) |
 | `gracePeriodSeconds` | integer | REQUIRED | Grace-period seconds bound into channel state at `open`; MUST be greater than zero and MUST match the challenge's `methodDetails.gracePeriodSeconds` |
+| `idleTimeoutSeconds` | integer | OPTIONAL | Client-selected inactivity threshold; MAY be present only when the challenge advertises `idleTimeoutOptionsSeconds` and MUST exactly match an offered value; when omitted, lets the server select the effective value |
 | `openSlot` | string | REQUIRED | Decimal u64 per-incarnation epoch encoded into the open instruction as `open_slot`; MUST satisfy the on-chain window rule of {{channel-closure}} when the transaction executes. Also a PDA derivation input: servers MUST include it when re-deriving and validating `channelId` |
 | `distributionSplits` | array | OPTIONAL | Splits preimage (see the challenge's `methodDetails.distributionSplits`); MUST byte-match the splits proposed in the 402 challenge |
 | `authorizationPolicy` | object | OPTIONAL | Voucher signer policy. When present, MUST be consistent with `authorizedSigner` |
@@ -1124,6 +1155,7 @@ Example `open` credential:
   "salt": "42",
   "depositAmount": "10000000",
   "gracePeriodSeconds": 900,
+  "idleTimeoutSeconds": 86400,
   "openSlot": "352114093",
   "transaction": "AQAB...base64..."
 }
@@ -1525,6 +1557,8 @@ each open channel:
 | `spentAmount` | Cumulative amount charged for delivered service |
 | `settledOnChain` | Highest cumulative amount already settled on-chain |
 | `closureStartedAt` | Pending forced-close timestamp, if any |
+| `lastActivityAt` | Server timestamp of the most recent channel activity defined in {{idle-timeout}} |
+| `idleTimeoutSeconds` | Effective negotiated inactivity threshold |
 
 Server-side channel state — in particular
 `acceptedCumulative` and the stored highest
@@ -1689,14 +1723,26 @@ idempotent request.
    the challenge policy and is greater than zero.
    Decode the open instruction and verify its
    `grace_period` equals the same value.
-6. Verify the credential's `openSlot` equals the
+6. Resolve the effective idle timeout as defined in
+   {{idle-timeout}}. If the credential contains
+   `idleTimeoutSeconds`, verify that the challenge
+   advertises `idleTimeoutOptionsSeconds` and that the
+   selected value exactly matches one of its values.
+   Reject an unsupported selection before signing,
+   paying fees, or broadcasting. The server MUST NOT
+   silently clamp or replace the client's value. If the
+   credential omits the field, select an offered value
+   when options were advertised, or select any value
+   from 1 through 2592000 seconds at the server's
+   discretion when they were not.
+7. Verify the credential's `openSlot` equals the
    decoded `open_slot` and satisfies the open-slot
    window against the server's current view of the
    cluster slot (`openSlot <= slot` and
    `slot - openSlot <= OPEN_SLOT_WINDOW`); the
    program enforces the same rule at execution (see
    {{channel-closure}}).
-7. Verify the transaction's fee payer matches the
+8. Verify the transaction's fee payer matches the
    challenge policy:
    - if `feePayer` is `true`, the fee payer MUST equal
      `feePayerKey`;
@@ -1712,7 +1758,7 @@ idempotent request.
    existing operator / fee payer and carries no separate
    wire field; a single operator signature satisfies
    both the fee-payer and `rentPayer` signer roles.
-8. Validate the complete compiled message — resolving
+9. Validate the complete compiled message — resolving
    any version-0 address-lookup-table entries — not just
    the channel instruction. Verify the transaction does
    not include unrelated writable accounts or
@@ -1722,18 +1768,18 @@ idempotent request.
    account by any instruction. The server SHOULD reject
    transactions that route value through unexpected
    external programs.
-9. Verify the decoded `deposit` equals
+10. Verify the decoded `deposit` equals
    `depositAmount`, satisfies
    `methodDetails.minimumDeposit` (when set), and that
    the resulting `distributionHash` matches the digest
    of the canonical preimage of the splits proposed in
    the 402 challenge.
-10. Reject any disagreement between the challenge,
+11. Reject any disagreement between the challenge,
    credential payload, decoded transaction, derived
    PDA, escrow ATA, or token program.
-11. If fee payer mode: co-sign and broadcast.
+12. If fee payer mode: co-sign and broadcast.
    Otherwise: broadcast as-is.
-12. Verify channel state on-chain after confirmation:
+13. Verify channel state on-chain after confirmation:
    - payer matches transaction signer;
    - payee matches the challenged recipient;
    - mint matches the challenge currency;
@@ -1747,10 +1793,12 @@ idempotent request.
      that funded the channel rent;
    - channel is not sealed; and
    - `closureStartedAt` is `0`.
-13. Create server-side channel state keyed by
+14. Create server-side channel state keyed by
    `channelId` (per-incarnation by construction, since
-   `openSlot` is a PDA seed).
-14. Return 200 with receipt.
+   `openSlot` is a PDA seed). Persist the effective idle
+   timeout and initialize `lastActivityAt` as part of
+   the same state transition.
+15. Return 200 with receipt.
 
 ## Resume
 
@@ -1765,7 +1813,9 @@ by the channel program and that its discriminator,
 including `openSlot`), `mint` (still allow-listed),
 `payee`, `authorizedSigner`, `openSlot`, and
 `distributionHash` all match the active challenge
-and session. Resume only ever applies to a live
+and session. The challenged `idleTimeoutSeconds` MUST
+equal the effective value stored for the channel.
+Resume only ever applies to a live
 channel: because `openSlot` is a PDA seed, a
 deallocated address is never reoccupied — reopening
 a closed relationship creates a new channel at a new
@@ -1844,6 +1894,80 @@ with no cooperative-close path can leave delivered
 service uncollectible: the permissionless `settle` crank
 cannot apply a new voucher once `requestClose` has moved
 the channel to `Closing`.
+
+## Server-Initiated Idle Close {#idle-timeout}
+
+For a new channel, the server advertises the supported
+values in `methodDetails.idleTimeoutOptionsSeconds`. If
+this field is absent, the server does not offer client
+selection and chooses the effective timeout at its
+discretion within the range from 1 through 2592000
+seconds, inclusive.
+
+For example, a server can offer 30 seconds, 10 minutes,
+and 1 day:
+
+~~~json
+{
+  "idleTimeoutOptionsSeconds": [30, 600, 86400]
+}
+~~~
+
+The client selects an offered value by including
+`idleTimeoutSeconds` in its `open` credential. The
+client MUST NOT include this field when the challenge
+omits `idleTimeoutOptionsSeconds`. If the client omits
+its selection, the server selects an offered value when
+options were advertised, or selects any value in the
+permitted range at its discretion when they were not.
+
+A client-selected value MUST exactly match an offered
+value. The server MUST reject an unsupported selection
+and MUST NOT silently clamp, replace, or otherwise
+reinterpret it. A successful open commits the server to
+the effective timeout for the lifetime of that channel.
+
+A challenge that resumes a channel MUST include the
+effective value as `methodDetails.idleTimeoutSeconds`,
+so the client can recover the negotiated policy without
+retaining the original open exchange. A resumed channel
+does not renegotiate its idle timeout.
+
+For this policy, channel activity is any of the
+following events that completes successfully:
+
+- opening or resuming the channel;
+- accepting a new voucher;
+- confirming a top-up; or
+- delivering a billable unit of service.
+
+Rejected credentials, failed transactions, and replayed
+requests that return a cached response are not channel
+activity. Servers MUST update `lastActivityAt` atomically
+with the state change or service delivery that constitutes
+channel activity.
+
+When no channel activity has occurred for the effective
+idle timeout, the server SHOULD initiate cooperative close
+promptly. It MUST NOT close a channel solely for inactivity
+before that interval has elapsed. Other terminal conditions,
+including operator shutdown or security intervention, MAY
+close a channel earlier; clients therefore MUST NOT treat
+the idle timeout as a guarantee that the channel remains
+available until the threshold.
+
+Before closing an idle channel, the server MUST atomically
+stop voucher acceptance, top-up processing, debit
+processing, and paid-service delivery for that channel.
+It MUST serialize the close against those operations and
+then follow {{close-cooperative}}, using the stored highest
+accepted voucher when its cumulative amount exceeds the
+on-chain settlement watermark. The mechanism that gates
+work while close is in progress is implementation-specific
+and does not define another server-side or on-chain channel
+status. A later client request for the closed channel
+receives the normal terminal-session error and a fresh
+challenge.
 
 ## Forced Close (Client-Initiated)
 
@@ -1929,6 +2053,7 @@ Receipts are returned in the `Payment-Receipt` header.
 | `challengeId` | string | OPTIONAL | Challenge identifier for audit correlation |
 | `acceptedCumulative` | string | REQUIRED | Highest voucher amount accepted |
 | `spent` | string | REQUIRED | Total amount charged so far |
+| `idleTimeoutSeconds` | integer | REQUIRED | Effective negotiated inactivity threshold for the channel |
 
 For close actions, the receipt MAY additionally
 include:
@@ -1969,6 +2094,13 @@ deposit", "Channel not found").
 
 All error responses MUST include a fresh challenge in
 `WWW-Authenticate`.
+
+When a server rejects a client-selected
+`idleTimeoutSeconds` that was not offered in the
+challenge, it MUST use the `verification-failed` problem
+type. Its `detail` SHOULD state that the requested idle
+timeout was not one of the advertised options. The fresh
+challenge conveys the currently supported options.
 
 # Security Considerations
 
@@ -2261,8 +2393,11 @@ Servers SHOULD therefore still enforce a minimum
 economically useful deposit to avoid channel spam
 with balances too small to justify signature
 verification and settlement overhead, and SHOULD
-close idle low-value channels promptly to recycle
-the rent float.
+apply the advertised idle timeout to recycle the rent
+float. Operators MAY use shorter advertised timeouts for
+low-value channels, but MUST keep the effective timeout
+stable after opening a channel as required by
+{{idle-timeout}}.
 
 ## Denial of Service
 
