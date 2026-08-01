@@ -980,7 +980,7 @@ externalId
 
 network
 : REQUIRED. Solana cluster identifier. MUST be one of
-  "mainnet-beta", "devnet", "testnet", or "localnet".
+  "mainnet", "devnet", or "localnet".
   There is no default; the challenge MUST state the
   cluster explicitly.
 
