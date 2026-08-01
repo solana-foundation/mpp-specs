@@ -996,6 +996,20 @@ channelId
   present, clients SHOULD verify the referenced channel
   is open and sufficiently funded before reuse.
 
+recentBlockhash
+: Conditionally REQUIRED when `channelId` is absent and MUST be absent
+  when resuming an existing channel. Base58-encoded recent blockhash for
+  the client to use when constructing the open transaction. The server
+  MUST obtain it from the selected `network`, and the client MUST use it
+  as the transaction message's recent blockhash.
+
+recentSlot
+: Conditionally REQUIRED when `channelId` is absent and MUST be absent
+  when resuming an existing channel. Decimal-string u64 identifying the
+  RPC context slot associated with `recentBlockhash`. It provides the
+  reference from which the client selects the open credential's
+  `openSlot` without making its own RPC request.
+
 decimals
 : Conditionally REQUIRED. Token decimal places (0–9).
   MUST be present when `currency` is a mint address.
@@ -1177,7 +1191,7 @@ Opens a new payment channel.
 | `depositAmount` | string | REQUIRED | Initial deposit in base units; MUST equal the decoded `open` deposit and satisfy `depositAmount >= minimumDeposit` (when the challenge sets one) |
 | `gracePeriodSeconds` | integer | REQUIRED | Grace-period seconds bound into channel state at `open`; MUST be greater than zero and MUST match the challenge's `methodDetails.gracePeriodSeconds` |
 | `idleTimeoutSeconds` | integer | OPTIONAL | Client-selected inactivity threshold; MAY be present only when the challenge advertises `idleTimeoutOptionsSeconds` and MUST exactly match an offered value; when omitted, lets the server select the effective value |
-| `openSlot` | string | REQUIRED | Decimal u64 per-incarnation epoch encoded into the open instruction as `open_slot`; MUST satisfy the on-chain window rule of {{channel-closure}} when the transaction executes. Also a PDA derivation input: servers MUST include it when re-deriving and validating `channelId` |
+| `openSlot` | string | REQUIRED | Decimal u64 per-incarnation epoch encoded into the open instruction as `open_slot`; MUST be no greater than the challenge's `methodDetails.recentSlot` and MUST satisfy the on-chain window rule of {{channel-closure}} when the transaction executes. Also a PDA derivation input: servers MUST include it when re-deriving and validating `channelId` |
 | `distributionSplits` | array | OPTIONAL | Splits preimage (see the challenge's `methodDetails.distributionSplits`); MUST byte-match the splits proposed in the 402 challenge |
 | `authorizationPolicy` | object | OPTIONAL | Voucher signer policy. When present, MUST be consistent with `authorizedSigner` |
 | `authentication` | object | Conditionally REQUIRED | Reusable proof from {{session-bearer-proof}}; REQUIRED for `operator` and MUST be absent for `client` |
@@ -1198,9 +1212,11 @@ focused on channel construction and avoids burning
 on-chain compute on a signature for a single
 request's worth of authorization.
 
-Clients SHOULD set `openSlot` to the cluster slot
-observed at transaction-build time. Because the
-client chooses the value — and `openSlot` is one of
+Clients SHOULD set `openSlot` to the challenge's
+`methodDetails.recentSlot` and MUST use the challenged
+`recentBlockhash` in the transaction. A client MAY choose an earlier
+`openSlot` to shorten the operator's post-close rent float. Because the
+client chooses `openSlot` — and it is one of
 the PDA derivation inputs — it can derive the
 channel address before the open transaction confirms
 and MAY pre-sign vouchers for the new channel
@@ -1919,6 +1935,9 @@ bearer proof.
    discretion when they were not.
 7. Verify the credential's `openSlot` equals the
    decoded `open_slot` and satisfies the open-slot
+   window relative to both the challenged `recentSlot`
+   (`openSlot <= recentSlot` and
+   `recentSlot - openSlot <= OPEN_SLOT_WINDOW`) and the
    window against the server's current view of the
    cluster slot (`openSlot <= slot` and
    `slot - openSlot <= OPEN_SLOT_WINDOW`); the
@@ -1943,6 +1962,7 @@ bearer proof.
 9. Validate the complete compiled message — resolving
    any version-0 address-lookup-table entries — not just
    the channel instruction. Verify the transaction does
+   use the challenged `recentBlockhash` and does
    not include unrelated writable accounts or
    instructions that could redirect funds or mutate
    channel parameters, and that the server fee payer is
