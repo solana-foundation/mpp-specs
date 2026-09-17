@@ -247,7 +247,8 @@ The following diagram illustrates the Solana subscription flow:
       │  (4) Authorization: Payment │                             │
       │-------------------------->  │                             │
       │                             │                             │
-      │                             │  (5) Co-sign + broadcast    │
+      │                             │  (5) Sign as puller and     │
+      │                             │      broadcast              │
       │                             │      subscription delegation│
       │                             │      + first transfer       │
       │                             │-------------------------->  │
@@ -294,7 +295,7 @@ take.
 | `currency` | string | SPL Token or Token-2022 mint address (see {{currency-formats}}) |
 | `periodUnit` | string | Billing period unit. The value MUST be `day` or `week` |
 | `periodCount` | string | Positive integer count of `periodUnit` values per billing period |
-| `recipient` | string | Recipient address authorized for subscription charges. The activation transaction MUST bind the destination at sign time |
+| `recipient` | string | Wallet address that receives every subscription charge. The on-chain `Plan` and each transfer MUST bind this address as described below |
 | `methodDetails` | object | Solana-specific extension data (see {{method-details}}) |
 
 ### Optional Fields
@@ -374,6 +375,15 @@ Servers MUST also verify that the mint account is owned by
 `methodDetails.tokenProgram` and that `methodDetails.decimals` matches
 the decimal precision recorded in the mint account.
 
+The non-zero entries in `plan.destinations` MUST consist of exactly
+one address, and that address MUST equal `recipient`. Servers and
+clients MUST reject request objects referencing a plan with an empty
+destination whitelist, more than one non-zero destination, or a
+destination different from `recipient`. The subscriptions program
+compares this whitelist against the owner of the receiver token
+account on every transfer, so this constraint binds activation and
+all renewals to the advertised recipient.
+
 ## Implementor Guidance
 
 This section is non-normative.
@@ -388,13 +398,9 @@ on-chain subscription system could express. Implementations should:
 - Refuse to map `periodUnit="month"` rather than approximate it with
   30-day or 31-day fixed periods. Clients receiving a `month` request
   for the Solana method should treat it as a server bug.
-- Avoid publishing a single `Plan` with a permissive destination
-  whitelist to cover multiple billing tiers or merchant accounts.
-  `Plan.destinations` is a whitelist of authorized receiver wallets,
-  not a payout split: each `transfer_subscription` pulls the full
-  amount to exactly one receiver. Widening the whitelist enlarges the
-  set of wallets a puller may direct funds to within the per-period
-  cap.
+- Publish a separate `Plan` for each recipient. This profile requires
+  exactly one non-zero `Plan.destinations` entry so that the program
+  can enforce the challenge's `recipient` on every transfer.
 - Submit at most one `transfer_subscription` per billing period per
   subscription, and never retry past the end of the period the
   transaction was constructed against.
@@ -447,24 +453,17 @@ operations and use no credential.
 | `payload` | object | REQUIRED | Solana-specific activation or access payload |
 | `source` | string | OPTIONAL | Subscriber identifier (e.g., `did:pkh:solana:...`) |
 
-Subscriptions on Solana MUST use one of two activation-payload types.
-In pull mode (`type="transaction"`), the client signs the activation
-transaction and submits the serialized bytes; the server co-signs as
-fee payer if configured and broadcasts. In push mode
-(`type="signature"`), the client broadcasts the activation
-transaction itself and submits the confirmed transaction signature.
+Solana subscription activation uses `type="transaction"`. The client
+signs the activation transaction as the subscriber and submits the
+serialized bytes. The server verifies the transaction, signs it as
+`methodDetails.puller`, adds the fee-payer signature when
+`methodDetails.feePayer` is `true`, and broadcasts it.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `type` | string | REQUIRED | `"transaction"` or `"signature"` |
-| `transaction` | string | CONDITIONAL | Standard-base64 of the signed activation transaction. REQUIRED when `type="transaction"` |
-| `signature` | string | CONDITIONAL | Base58 of the on-chain transaction signature. REQUIRED when `type="signature"` |
+| `type` | string | REQUIRED | The string `"transaction"` |
+| `transaction` | string | REQUIRED | Standard-base64 of the activation transaction signed by the subscriber. The server adds the puller signature and, when configured, its fee-payer signature |
 | `authentication` | object | REQUIRED | Reusable payer proof defined in {{subscription-bearer-proof}} |
-
-Servers MUST reject credentials where `type="signature"` is combined
-with `methodDetails.feePayer` set to `true`, because the server has
-no opportunity to co-sign a transaction the client has already
-broadcast.
 
 ## Subscription Bearer Proof {#subscription-bearer-proof}
 
@@ -551,7 +550,7 @@ it, and MUST prevent it from appearing in URLs, analytics, or error
 reports. An `Idempotency-Key` prevents replay of an application request;
 it does not constrain use of a leaked bearer proof.
 
-The signed activation transaction MUST:
+The subscriber-signed activation transaction MUST:
 
 - contain a `subscribe` instruction creating the
   `SubscriptionDelegation` PDA from the on-chain `Plan` snapshot;
@@ -566,28 +565,29 @@ The signed activation transaction MUST:
   `methodDetails.tokenProgram` for all token-touching instructions;
 - pull funds from the subscriber's associated token account for
   `methodDetails.mint`;
-- direct the first-period charge to a receiver ATA whose owner is
-  authorized by `plan.destinations` (any owner when the whitelist is
-  empty);
+- use `methodDetails.puller` as the required signer for the
+  `transfer_subscription` instruction;
+- direct the first-period charge to a receiver ATA whose token-account
+  owner equals `recipient`;
 - set the fee payer to `methodDetails.feePayerKey` when
   `methodDetails.feePayer` is `true`, and to the subscriber otherwise;
 - contain no instructions other than those above plus optional
   compute-budget and memo instructions.
 
-The signed activation transaction MUST NOT contain SPL Token `Approve`
-or any other non-subscriptions-program instruction that could move the
-subscriber's tokens outside the per-period limit, and MUST NOT
-reference writable accounts that could redirect funds to a receiver
-not authorized by `plan.destinations`.
+The subscriber-signed activation transaction MUST NOT contain SPL
+Token `Approve` or any other non-subscriptions-program instruction
+that could move the subscriber's tokens outside the per-period limit,
+and MUST NOT reference writable accounts that could redirect funds
+away from `recipient`.
 
 ## Activation Single-Use
 
 Each "subscription" activation credential MUST be usable only once
 per challenge. Servers MUST reject replayed credentials.
 
-This single-use requirement applies to `type="transaction"` and
-`type="signature"` activation credentials. It does not apply to a
-`type="proof"` access credential defined in
+This single-use requirement applies to `type="transaction"`
+activation credentials. It does not apply to a `type="proof"` access
+credential defined in
 {{subscription-bearer-proof}}.
 
 A successfully activated subscription may be reused for later billing
@@ -610,11 +610,12 @@ charge are a single atomic transaction:
       |                             |                             |
       |  (1) Authorization:         |                             |
       |      Payment <credential>   |                             |
-      |      (signed activation tx) |                             |
+      |      (subscriber-signed tx) |                             |
       |-------------------------->  |                             |
       |                             |                             |
-      |                             |  (2) Co-sign if feePayer,   |
-      |                             |      sendTransaction        |
+      |                             |  (2) Sign as puller and,    |
+      |                             |      if configured, fee     |
+      |                             |      payer; sendTransaction |
       |                             |-------------------------->  |
       |                             |                             |
       |                             |  (3) SubscriptionDelegation |
@@ -631,14 +632,15 @@ charge are a single atomic transaction:
 When the server receives a Solana "subscription" credential, it MUST:
 
 1. Verify the activation transaction matches the challenge: program
-   ID, plan address, token program, mint, puller, destinations, and
+   ID, plan address, token program, mint, puller, recipient, and
    per-period amount as described in
    {{authorization-scope-verification}}.
 2. Verify the subscriber identity per {{source-verification}}.
 3. Verify and retain the subscription bearer proof per
    {{subscription-bearer-proof}}.
-4. Co-sign the transaction as fee payer when `methodDetails.feePayer`
-   is `true`, then broadcast.
+4. Sign the transaction as `methodDetails.puller`. When
+   `methodDetails.feePayer` is `true`, also sign as
+   `methodDetails.feePayerKey`, then broadcast.
 5. Wait for confirmation and read the resulting on-chain state.
 6. Initialize durable subscription state, including the exact bound
    proof, for later access and renewals.
@@ -680,6 +682,7 @@ that the activation transaction:
   token instructions;
 - uses `methodDetails.planAddress` as the `Plan` account and uses
   `methodDetails.puller` as the authorized puller signer;
+- uses a receiver ATA whose token-account owner equals `recipient`;
 - contains exactly one subscribe instruction and exactly one
   first-period transfer instruction on the subscriptions program,
   ordered with subscribe first;
@@ -706,7 +709,8 @@ broader scopes than those required above.
 For each later billing period, the server MAY submit one
 `transfer_subscription` transaction using the registered subscription
 delegation. The transaction MUST pull exactly `amount` to a receiver
-ATA whose owner is authorized by `plan.destinations`.
+ATA whose token-account owner equals the `recipient` bound at
+activation.
 
 If the server grants access for a later billing period, it MUST
 ensure that the renewal charge for that period has been collected
@@ -935,6 +939,7 @@ Instruction 4: subscriptions.transfer_subscription
                           token_program]
 Fee payer: 5fKb5cF22cFybZB1H4hLDydFhwoQy9JzKzRWaSbMkB6h (server)
 Signatures: subscriber (partial), puller (server, added at co-sign)
+Destination ATA owner: 9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin
 ~~~
 
 **Credential:**
@@ -1094,8 +1099,11 @@ Clients MUST parse and verify the `request` payload before signing:
 5. Verify `subscriptionExpires` is acceptable when present
 6. Verify the on-chain `Plan` referenced by
    `methodDetails.planAddress` carries matching mint, per-period
-   amount, and per-billing-period interval, and lists the server's
-   puller among its authorized pullers
+   amount, and per-billing-period interval; authorizes the server's
+   puller as the plan owner or in `plan.pullers`; and has exactly one
+   non-zero destination equal to `recipient`
+7. Verify the activation `transfer_subscription` instruction uses a
+   receiver ATA whose token-account owner equals `recipient`
 
 Clients MUST NOT sign an activation transaction whose on-chain `Plan`
 does not match the challenge. Clients MUST NOT rely on the
@@ -1152,18 +1160,18 @@ credential rotation is required.
 ## Destination Scoping
 
 Solana subscription delegations MUST be bound to a receiver
-authorized by `plan.destinations`. Servers MUST reject credentials
-whose activation transaction routes value to any unauthorized
-receiver.
+identified by `recipient`. Clients and servers MUST reject credentials
+whose activation transaction uses a receiver ATA owned by any other
+address. Servers MUST use a receiver ATA owned by the same recipient
+for every renewal.
 
 ## Plan Scope Minimization
 
-`plan.destinations` is a whitelist, not a payout split: it bounds the
-set of wallets a puller may target on any given pull. Subscription
-`Plan` accounts SHOULD therefore enumerate only the receivers that
-will actually be used, and SHOULD avoid an empty (open) whitelist in
-production, since any pull within the per-period cap could otherwise
-be directed to an arbitrary receiver.
+`plan.destinations` is a whitelist, not a payout split. The underlying
+program permits an empty whitelist or several destinations, but this
+profile does not. The non-zero destination set MUST contain only
+`recipient`, making the recurring recipient restriction immutable and
+program-enforced for the lifetime of the plan.
 
 ## Subscription Authority Isolation
 
