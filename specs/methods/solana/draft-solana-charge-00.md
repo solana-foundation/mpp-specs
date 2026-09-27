@@ -1362,10 +1362,11 @@ composed transaction the server MUST:
    referenced by the instruction's program-ID index. An
    accepted program reached only as an inner instruction
    does not make a transaction composed.
-2. Apply the envelope checks of {{transaction-versions}}
-   (message version, serialized size, no address lookup
-   tables) and the compute-budget caps that apply to
-   base-set transactions.
+2. Apply the same envelope checks as a direct transfer
+   ({{transaction-verification}}): accepted message
+   version, serialized size, no address lookup tables,
+   and the compute-budget caps that apply to base-set
+   transactions.
 3. Verify the fee payer matches the challenge policy. When
    `feePayer` is `true`, the server's `feePayerKey` MUST
    NOT appear in the account list of any instruction, at
@@ -1376,7 +1377,8 @@ composed transaction the server MUST:
 4. Apply the base-set rules of {{transaction-verification}}
    to every top-level base-set instruction: Memo
    instructions are limited to those the challenge
-   requests, ATA creation is limited to the owners that
+   requests and MUST appear at the top level, ATA
+   creation is limited to the owners that
    {{split-recipient-ata-creation}} permits, and a
    top-level System Program or token instruction is
    permitted only as a required payment leg matched in
@@ -2118,8 +2120,9 @@ Composed transactions with client-paid fees expose no
 sponsor at all.
 
 Composed transactions widen the compute footprint a sponsor
-pays for; the caps of {{transaction-versions}} and per-client
-rate limiting remain the controls. Listing a program also
+pays for; the compute-budget caps of
+{{transaction-verification}} and per-client rate limiting
+remain the controls. Listing a program also
 means trusting its upgrade authority: a program upgraded to
 misbehave cannot harm the isolated fee payer, but it can
 stop paying the merchant, which simulation detects before
