@@ -991,6 +991,23 @@ channelProgram
   verify this matches their expected program for that
   cluster before depositing funds.
 
+allowedPrograms
+: OPTIONAL. An array of at most 8 base58-encoded program
+  IDs that the server accepts as top-level instruction
+  programs in `open` and `topUp` transactions, in addition
+  to the default set every server accepts: `channelProgram`,
+  the Ed25519 signature-verification program, the
+  Associated Token Account program, the token programs, and
+  the Compute Budget program. Listing a program enables
+  program-funded channels ({{program-funded}}), in which a
+  listed program invokes `open` or `topUp` by cross-program
+  invocation on behalf of a program-derived `payer`. Entries
+  MUST NOT repeat default-set programs. When absent, servers
+  MUST reject `open` and `topUp` transactions whose
+  top-level instructions invoke a program outside the
+  default set. The list is server policy, bound into the
+  challenge by its `id` ({{pda-payer-security}}).
+
 channelId
 : OPTIONAL. Existing channel identifier to resume. When
   present, clients SHOULD verify the referenced channel
@@ -1183,7 +1200,7 @@ Opens a new payment channel.
 |-------|------|----------|-------------|
 | `action` | string | REQUIRED | `"open"` |
 | `channelId` | string | REQUIRED | Base58 channel account address |
-| `payer` | string | REQUIRED | Base58 public key of the depositor |
+| `payer` | string | REQUIRED | Base58 address of the depositor. MUST be a transaction signer, unless it is a program-derived address controlled by a program the challenge lists in `allowedPrograms` ({{program-funded}}) |
 | `payee` | string | REQUIRED | Base58 public key of the channel payee (matches `recipient` in the 402 challenge) |
 | `mint` | string | REQUIRED | Base58 SPL Token / Token-2022 mint (matches `currency` in the 402 challenge) |
 | `authorizedSigner` | string | REQUIRED | Base58 public key bound into the PDA seeds as the voucher signer; MAY equal `payer` or a delegated signer |
@@ -1203,6 +1220,12 @@ When `feePayer` is `true`, the client partially signs
 (transfer authority only) and the server co-signs as
 fee payer before broadcasting — same pattern as the
 charge intent's pull mode.
+
+In a program-funded open ({{program-funded}}), the
+top-level instruction belongs to a listed program and
+`open` is reached as an inner instruction. The client
+signs whatever the listed program requires; typically the
+client's key is `authorizedSigner` and is not `payer`.
 
 `Action: "open"` MUST NOT carry an initial voucher.
 The first voucher is exchanged off-chain in a
@@ -1348,7 +1371,7 @@ Adds funds to an existing channel.
 | `action` | string | REQUIRED | `"topUp"` |
 | `channelId` | string | REQUIRED | Existing channel identifier |
 | `additionalAmount` | string | REQUIRED | Amount to add in base units |
-| `transaction` | string | REQUIRED | Base64-encoded signed topUp transaction |
+| `transaction` | string | REQUIRED | Base64-encoded signed topUp transaction; MAY be program-funded ({{program-funded}}) when the channel's `payer` is a program-derived address |
 
 ## Action: "close"
 
@@ -1706,6 +1729,133 @@ transaction fees nor for channel rent — during the
 entire session lifecycle; the client transacts in
 stablecoin only.
 
+# Program-Funded Channels {#program-funded}
+
+In the default model the client's own key is the channel
+`payer`: it signs `open` and `topUp`, its associated token
+account is the deposit source, and it receives the payer
+refund at close. Some clients never hold the stablecoin.
+Their funds sit in an upstream escrow — for example a
+payment channel opened for them by a credit issuer — or
+behind a treasury program. A program-funded channel lets
+such a client open and top up a session channel without
+holding the stablecoin at any point.
+
+## Model
+
+A program-funded channel is an ordinary channel whose
+`payer` is a program-derived address controlled by a
+program the server lists in `methodDetails.allowedPrograms`.
+In one transaction that program:
+
+- receives value into the PDA's associated token account,
+  for instance by settling and distributing an upstream
+  channel whose committed payee is the PDA; and
+- invokes `open` (or `topUp`) by cross-program invocation,
+  signing for the PDA with `invoke_signed`.
+
+It also exposes `requestClose` for the PDA, so the client
+retains the forced-close path of {{channel-closure}}.
+
+The channel program requires only that `payer` signs
+`open` and `topUp`; it does not require `payer` to be an
+on-curve key. `authorizedSigner` MUST still be an on-curve
+key ({{authorized-signer}}) and is typically the client's
+key, so metered requests, vouchers, and close
+authentication are exactly as in the default model.
+`rentPayer` remains the operator.
+
+## Wire Format
+
+No credential field changes. `Action: "open"` carries the
+PDA in `payer`, the client's key in `authorizedSigner`, and
+the composed transaction in `transaction`. Servers detect a
+program-funded open or top-up from the programs its
+top-level instructions invoke.
+
+## Verification
+
+Servers verify a program-funded `open` or `topUp` by
+outcome, following {{open-settlement}} and the `topUp`
+procedure with these modifications:
+
+1. Every top-level instruction MUST invoke a default-set
+   program (`channelProgram`, the Ed25519 program, the
+   Associated Token Account program, SPL Token, Token-2022,
+   Compute Budget) or a program listed in
+   `allowedPrograms`; otherwise reject with
+   `malformed-credential`.
+2. The `open` or `topUp` instruction is obtained by
+   simulating the transaction with `innerInstructions:
+   true`. Every field check of {{open-settlement}} steps 2
+   through 12 applies to that inner instruction. Simulation
+   failure MUST reject the credential.
+3. When `feePayer` is `true`, `feePayerKey` MUST NOT appear
+   in the account list of any instruction and MUST NOT be
+   referenced as a program ID. The operator's exposure is
+   then the bounded transaction fee plus the channel rent it
+   already sponsors in the default model.
+4. After confirmation, the on-chain channel state MUST show
+   `payer` equal to the credential's `payer`, an off-curve
+   address, with every other field as in step 14 of
+   {{open-settlement}}.
+
+Inner instructions emitted by a listed program other than
+the `open` or `topUp` itself are that program's behavior,
+which the server accepted by listing it.
+
+## Refunds and Close
+
+The payer refund at close (`withdrawPayer`, or the sealed
+`distribute`) is paid to the PDA's canonical associated
+token account, which the listed program controls. What the
+program does with it — returns it to an upstream escrow,
+credits an off-chain balance — is outside this
+specification. The merchant-side guarantees are unchanged:
+payee proceeds are gated by vouchers signed by
+`authorizedSigner`, and settlements never exceed `deposit`.
+
+`requestClose` is payer-only in the channel program. A
+program-funded channel MUST be controlled by a program that
+lets the client trigger `requestClose`; a server that
+cannot establish this SHOULD refuse to meter the channel,
+because the client would otherwise have no forced-close
+path.
+
+## Funding Topologies and Forward Compatibility
+
+Three funding paths produce the same on-chain channel and
+the same verification:
+
+Direct payer
+: The client's key funds the channel. The default model.
+
+Program-funded payer over an upstream channel
+: A listed program settles an upstream channel into its
+  PDA's token account and invokes `open` or `topUp` in the
+  same transaction. This works with the channel program as
+  deployed.
+
+Channel-to-channel funding
+: An upstream channel's `distribute` names the session
+  channel's PDA as a recipient, so its share lands directly
+  in the session escrow, and a subsequent instruction
+  credits that balance to `deposit`. This requires a channel
+  program instruction that reconciles `deposit` with the
+  escrow balance, which the deployed program does not yet
+  provide; until it does, such tokens are unaccounted and
+  are swept to the program treasury at close. When that
+  instruction ships, a top-up funded this way invokes only
+  default-set programs, so it needs no `allowedPrograms`
+  entry at all, and only the composed transaction's inner
+  sequence changes: the credential and the outcome checks
+  above are unchanged.
+
+Servers implementing this section therefore need no further
+change to support future funding paths, provided they
+verify by simulated and confirmed outcome rather than by
+decoding a fixed top-level instruction layout.
+
 # Server State Management
 
 ## Per-Channel State
@@ -1897,7 +2047,15 @@ bearer proof.
    reference implementation composes channel-PDA
    creation, escrow ATA creation, deposit transfer,
    and the `distributionHash` commitment in a single
-   instruction).
+   instruction). For a program-funded open
+   ({{program-funded}}), `open` is an inner instruction:
+   the server MUST obtain it by simulating the transaction
+   with `innerInstructions: true` before signing, paying
+   fees, or broadcasting; MUST verify that the invoking
+   top-level instruction belongs to a program listed in
+   `allowedPrograms`; and MUST apply every check below to
+   that simulated inner instruction, resolving its accounts
+   against the transaction's static account keys.
 2. Verify the instruction targets the challenged
    channel program and encodes the challenged `payer`,
    `payee`, `mint`, `authorizedSigner`, `salt`,
@@ -1947,7 +2105,14 @@ bearer proof.
    challenge policy:
    - if `feePayer` is `true`, the fee payer MUST equal
      `feePayerKey`;
-   - otherwise the payer funds the transaction.
+   - otherwise the payer funds the transaction;
+   - when `payer` is a program-derived address
+     ({{program-funded}}), no payer signature is expected —
+     the listed program signs `open` for its PDA through
+     cross-program invocation — and, when `feePayer` is
+     `true`, `feePayerKey` MUST NOT appear in the account
+     list of any instruction or be referenced as a program
+     ID.
 
    Verifiers that read the `open` accounts by fixed
    index MUST account for the `rentPayer` account at
@@ -1967,9 +2132,10 @@ bearer proof.
    instructions that could redirect funds or mutate
    channel parameters, and that the server fee payer is
    never used as an authority, source, or writable
-   account by any instruction. The server SHOULD reject
-   transactions that route value through unexpected
-   external programs.
+   account by any instruction. The server MUST reject
+   transactions whose top-level instructions invoke a
+   program that is neither `channelProgram`, a base
+   program, nor listed in `allowedPrograms`.
 10. Verify the decoded `deposit` equals
    `depositAmount`, satisfies
    `methodDetails.minimumDeposit` (when set), and that
@@ -1987,7 +2153,11 @@ bearer proof.
 13. If fee payer mode: co-sign and broadcast.
    Otherwise: broadcast as-is.
 14. Verify channel state on-chain after confirmation:
-   - payer matches transaction signer;
+   - payer equals the credential's `payer`; an on-curve
+     payer MUST have signed the transaction, and a
+     program-derived payer MUST have reached `open`
+     through cross-program invocation from a listed
+     program ({{program-funded}});
    - payee matches the challenged recipient;
    - mint matches the challenge currency;
    - deposit matches the requested amount;
@@ -2055,7 +2225,13 @@ This procedure directly authorizes service only for
    Otherwise: broadcast as-is.
 2. Verify the top-up transaction targets the expected
    channel PDA and channel program and only increases
-   deposit for that channel.
+   deposit for that channel. For a program-funded top-up
+   ({{program-funded}}), obtain the `topUp` instruction by
+   simulating with `innerInstructions: true`, verify that
+   its invoking top-level program is listed in
+   `allowedPrograms`, and verify that the fee payer appears
+   in no instruction's account list. Perform these checks
+   before co-signing or broadcasting.
 3. Verify the on-chain deposit increase after
    confirmation.
 4. Increase `escrowedAmount` in server-side state.
@@ -2190,8 +2366,10 @@ challenge.
 If the server becomes unresponsive, the client can
 force-close the channel:
 
-1. The payer authorizes `requestClose` and submits it
-   directly to RPC. Because the operator funds channel
+1. The payer — or, for a program-derived payer, the listed
+   program that controls it, acting on the client's
+   instruction ({{program-funded}}) — authorizes
+   `requestClose` and submits it directly to RPC. Because the operator funds channel
    rent and the client transacts in stablecoin only, a
    SOL-free client cannot pay the transaction fee for
    this escape route on its own; such a client MUST
@@ -2482,6 +2660,40 @@ different payee, distribution split, deposit, signer,
 channel PDA, or grace period. Such a mismatch can make
 the server sponsor or meter a channel it did not
 challenge.
+
+## Program-Derived Payers {#pda-payer-security}
+
+A program-funded channel ({{program-funded}}) replaces the
+client's signature on `open` and `topUp` with a listed
+program's `invoke_signed`. The operator's exposure is the
+same as in the sponsored default: transaction fee and
+channel rent. Fee-payer isolation keeps the operator key
+out of every instruction, and simulation proves the `open`
+or `topUp` before the operator signs, so a listed program
+cannot make the operator pay for a channel that does not
+open with the challenged parameters.
+
+The invariants bound the operator's loss; they do not stop
+a client from packing other work into an accepted program
+at the operator's expense in the same transaction. The
+operator still receives a channel funded with the
+challenged deposit for a capped fee, so the client is
+buying that side effect at the price of the deposit.
+Operators that sponsor fees SHOULD set `minimumDeposit`
+above the maximum sponsored fee plus the channel rent they
+float. Program-funded transactions with client-paid fees
+expose no sponsor at all.
+
+Listing a program is a trust decision about that program's
+upgrade authority. Servers SHOULD list only audited
+programs and SHOULD prefer one canonical funding program
+over per-product programs, since every participating server
+must list it.
+
+A client of a program-funded channel depends on the listed
+program for `requestClose` and for the disposition of the
+payer refund. That is a client-side trust relationship with
+the funding program, not with the server.
 
 ## Cumulative Amount Safety
 

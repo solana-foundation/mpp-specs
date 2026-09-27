@@ -73,6 +73,12 @@ informative:
     author:
       - org: Anza
     date: 2026
+  I-D.solana-session:
+    title: "Solana Session Intent for HTTP Payment Authentication"
+    target: https://datatracker.ietf.org/doc/draft-solana-session/
+    author:
+      - name: Ludo Galabru
+    date: 2026
   BASE58:
     title: "Base58 Encoding Scheme"
     target: https://datatracker.ietf.org/doc/html/draft-msporny-base58-03
@@ -94,6 +100,13 @@ where the client sends the signed transaction to the server for
 broadcast, and `type="signature"` (fallback), where the client
 broadcasts the transaction itself and presents the on-chain transaction
 signature for server verification.
+
+Servers MAY additionally accept composed transactions, in which a
+program the server has allow-listed produces the payment — for
+example a payment channel settling to the merchant, a multisig, or a
+smart wallet. Such transactions use the same `type="transaction"`
+credential and are verified by their simulated and confirmed outcome
+rather than by a fixed instruction layout.
 
 This document also defines an optional confidential charge profile, in
 which the transferred amount is encrypted on-chain using the Token-2022
@@ -263,6 +276,21 @@ Push Mode
   signature (`type="signature"`). The client "pushes" the
   transaction to the network directly. Cannot be used with
   fee sponsorship.
+
+Composed Transaction
+: A pull-mode transaction in which the payment leg(s) are
+  produced by a program the server has allow-listed
+  ({{composed-transactions}}), usually as inner
+  (cross-program) instructions, rather than by a transfer
+  instruction the client signs directly. Verified by
+  outcome ({{composed-verification}}).
+
+Program-Derived Address (PDA)
+: An off-curve account address derived from a program ID
+  and seeds. Only the deriving program can sign for it,
+  through cross-program invocation. A PDA can be the
+  transfer authority of a payment leg in a composed
+  transaction.
 
 Confidential Transfer
 : A Token-2022 transfer in which the transferred amount is
@@ -496,6 +524,24 @@ recentBlockhash
   the full lifetime of the payment challenge. If omitted,
   clients MUST fetch a recent blockhash themselves.
 
+allowedPrograms
+: OPTIONAL. An array of at most 8 base58-encoded program
+  IDs that the server accepts as top-level instruction
+  programs in a composed transaction
+  ({{composed-transactions}}), in addition to the base
+  instruction set of {{transaction-verification}} and the
+  default composed set, which every server accepts without
+  advertising it. Most deployments never set this field;
+  it exists for operators integrating a specific program
+  such as a multisig or smart wallet. Entries MUST NOT
+  include base-set programs or default-composed-set
+  programs. The list is server policy, bound into the
+  challenge by its `id`: clients MUST NOT treat a
+  program's absence as negotiable, and servers MUST list
+  only programs they have reviewed for fee-payer safety
+  ({{composed-security}}). MUST be absent when
+  `confidential` is `true`.
+
 confidential
 : OPTIONAL. A boolean indicating that the charge MUST be
   settled as a Token-2022 confidential transfer
@@ -717,6 +763,13 @@ MUST set the server's `feePayerKey` as fee payer, and the
 client signs only as transfer authority; the server adds the
 fee payer signature before broadcasting (see
 {{fee-sponsorship}}).
+
+The transaction MAY be a composed transaction
+({{composed-transactions}}), in which an accepted program
+produces the payment. The payload shape is unchanged:
+`type` remains `"transaction"` and no field signals
+composition. Servers detect a composed transaction from the
+programs its top-level instructions invoke.
 
 Example (decoded):
 
@@ -1134,7 +1187,15 @@ For credentials with `type="transaction"`:
 
 1. Decode the base64 `payload.transaction` value.
 
-2. Deserialize the transaction and verify that it
+2. Deserialize the transaction and classify it. The base
+   instruction set is the System Program, SPL Token,
+   Token-2022, the Associated Token Account program, the
+   Memo program, and the Compute Budget program. If any
+   top-level instruction invokes a program outside the base
+   set, the transaction is a composed transaction and MUST
+   be verified as described in {{composed-verification}};
+   steps 3 through 9 then apply with the modifications given
+   there. Otherwise, verify that the transaction
    structurally matches the challenge request:
    - the fee payer matches the challenge policy;
    - the transfer authority is signed by the client;
@@ -1174,7 +1235,10 @@ For credentials with `type="transaction"`:
 7. Fetch the confirmed transaction using `getTransaction`
    with `jsonParsed` encoding and verify the transfer
    details still match the challenge request, as described in
-   {{sol-verification}} or {{spl-verification}}.
+   {{sol-verification}} or {{spl-verification}}. For a
+   composed transaction, search `meta.innerInstructions` as
+   well as the top-level instructions
+   ({{composed-verification}}).
 
 8. Record the transaction signature as consumed to
    prevent replay (see {{replay-protection}}).
@@ -1280,6 +1344,83 @@ set of required payment legs. A `transferChecked` instruction
 to an ATA created by the transaction satisfies a required
 payment leg only if that ATA owner appears in `splits` for the
 selected challenge.
+
+## Composed Transaction Verification {#composed-verification}
+
+A composed transaction ({{composed-transactions}}) cannot
+be verified by decoding a transfer the client signed,
+because its payment leg(s) are emitted by an allow-listed
+program, usually as inner (cross-program) instructions.
+Servers verify such transactions by outcome. For a
+composed transaction the server MUST:
+
+1. Reject the transaction unless every top-level
+   instruction invokes a base-set program, a program in
+   the default composed set ({{composed-transactions}}),
+   or a program listed in the challenge's
+   `allowedPrograms`. The program is the account
+   referenced by the instruction's program-ID index. An
+   accepted program reached only as an inner instruction
+   does not make a transaction composed.
+2. Apply the same envelope checks as a direct transfer
+   ({{transaction-verification}}): accepted message
+   version, serialized size, no address lookup tables,
+   and the compute-budget caps that apply to base-set
+   transactions.
+3. Verify the fee payer matches the challenge policy. When
+   `feePayer` is `true`, the server's `feePayerKey` MUST
+   NOT appear in the account list of any instruction, at
+   any position, and MUST NOT be referenced as a program
+   ID. A fee payer absent from every instruction can be
+   debited only for the transaction fee, which the compute
+   caps bound ({{composed-security}}).
+4. Apply the base-set rules of {{transaction-verification}}
+   to every top-level base-set instruction: Memo
+   instructions are limited to those the challenge
+   requests and MUST appear at the top level, ATA
+   creation is limited to the owners that
+   {{split-recipient-ata-creation}} permits, and a
+   top-level System Program or token instruction is
+   permitted only as a required payment leg matched in
+   step 6. Because step 3 keeps the sponsor out of every
+   instruction, a sponsored composed transaction cannot
+   carry sponsor-funded ATA creation: a challenge whose
+   `splits` set `ataCreationRequired` cannot be paid with
+   a composed transaction when `feePayer` is `true`.
+5. Simulate the transaction with `simulateTransaction`,
+   requesting inner instructions (`innerInstructions:
+   true`), regardless of `feePayer`. The server MUST
+   reject the credential if simulation fails.
+6. Locate every required payment leg — the primary payment
+   and each entry of `splits` — among the top-level
+   instructions and the simulated inner instructions,
+   applying the matching rules of {{sol-verification}} or
+   {{spl-verification}}: mint, destination associated token
+   account (or system account for `"sol"`), amount, and one
+   distinct instruction per leg. The transfer authority MAY
+   be a program-derived address and need not be a
+   transaction signer. The fee payer MUST NOT be the
+   authority or the source of any leg.
+7. Broadcast, confirm, and re-verify as in steps 5 through
+   8 of {{transaction-verification}}. The post-confirmation
+   check MUST search `meta.innerInstructions` of the
+   `jsonParsed` transaction as well as the top-level
+   instructions, and MUST re-apply the top-level program
+   check of step 1 to the confirmed transaction.
+
+Inner instructions emitted by an accepted program are not
+subject to the base-set allow-list: they are that
+program's behavior, which the server accepted by
+accepting the program. Servers MUST NOT count one inner
+instruction toward more than one payment leg.
+
+The client's signature role in a composed transaction is
+whatever the accepted program requires. A composed
+transaction MAY carry no client signature at all when every
+composed instruction is permissionless. The server's
+protection then rests entirely on steps 3, 5, and 6, which
+together guarantee that a sponsor pays a bounded fee only
+for a transaction that delivers the challenged amount.
 
 ## Confidential Transfer Verification {#confidential-verification}
 
@@ -1590,6 +1731,72 @@ When `feePayer` is `false` or absent:
 Clients SHOULD set a compute unit limit and priority
 fee appropriate for current network conditions.
 
+### Composed Transactions {#composed-transactions}
+
+A client whose funds are not held directly by its signing
+key — credits escrowed in a payment channel, a treasury
+behind a multisig, a smart-wallet program — MAY pay a
+charge with a composed transaction: a transaction whose
+payment leg(s) are produced by a program rather than by a
+transfer the client signs itself.
+
+Two sets of programs are accepted at the top level of a
+composed transaction, beyond the base set:
+
+Default composed set
+: The Ed25519 signature-verification program
+  (`Ed25519SigVerify111111111111111111111111111`) and the
+  payment-channel program deployed for the challenged
+  `network` — the program a `session` challenge for that
+  network advertises as `channelProgram`
+  ({{I-D.solana-session}}). Servers implementing this
+  document MUST accept the default composed set. It is
+  never advertised; clients MAY rely on it. Together these
+  two programs let a client pay a charge from a payment
+  channel whose committed payee is the merchant, without
+  any server configuration.
+
+Challenge-listed programs
+: The programs in `methodDetails.allowedPrograms`, if any.
+
+A client MUST NOT build a composed transaction that
+invokes, at the top level, any program outside the base
+set, the default composed set, and the challenge's
+`allowedPrograms`. A client that cannot satisfy this MUST
+NOT attempt the challenge with a composed transaction; it
+MAY select another challenge or fall back to a direct
+transfer. A server that predates this section rejects
+composed transactions as malformed; clients SHOULD treat
+that rejection as a signal to fall back.
+
+The client constructs the transaction so that, when
+executed, the challenged `recipient` receives exactly the
+primary amount at its associated token account (or system
+account for `"sol"`) and each split recipient receives its
+split amount, each in a distinct transfer instruction.
+Which instruction produces each leg, and whether it is a
+top-level or an inner instruction, is the client's choice.
+Memo and ATA-creation instructions follow the same rules as
+a direct transfer.
+
+Fee-payer rules are unchanged: with `feePayer: true` the
+client sets `feePayerKey` as fee payer, MUST NOT reference
+that key in any instruction, and leaves its signature slot
+empty; otherwise the client is the fee payer and fully
+signs.
+
+For example, a client holding a payment channel
+({{I-D.solana-session}}) whose committed payee is the
+challenged `recipient` can pay with three instructions: an
+Ed25519 signature-verification instruction carrying the
+channel's signed voucher, the channel program's `settle`,
+and its `distribute`. The `distribute` instruction emits
+the `transferChecked` from the channel escrow to the
+recipient's associated token account as an inner
+instruction. Both programs are in the default composed
+set, so the server advertises nothing and nothing changes
+on the wire.
+
 ## Confirmation Requirements
 
 For `type="signature"` credentials, clients MUST wait for
@@ -1844,7 +2051,82 @@ only the expected instructions: transfer instruction(s)
 matching the challenge parameters, ATA creation
 (idempotent), and optionally compute budget
 instructions. Any unexpected instructions MUST cause
-rejection.
+rejection. A server that accepts composed transactions
+relaxes this rule only for the default composed set and
+the programs it lists in `allowedPrograms`, under the
+invariants of {{composed-security}}.
+
+## Composed Transactions and Sponsor Abuse {#composed-security}
+
+The strict instruction set of {{transaction-verification}}
+exists because sponsored transactions have been abused in
+practice: a client presents a transaction that the sponsor
+pays for but that does something other than paying the
+merchant. Composed transactions keep that protection while
+removing the requirement that the payment leg be a transfer
+the client signs directly. The protection rests on four
+invariants, each of which servers MUST enforce:
+
+Reviewed program set
+: Only the default composed set and the programs the
+  operator lists in `allowedPrograms` are accepted, and
+  the list is bound into the challenge by its `id`; a
+  client cannot extend it. The default composed set is
+  reviewed by this specification: the Ed25519 program
+  reads no accounts, and the payment-channel program moves
+  tokens only between a channel's escrow and the
+  recipients committed at that channel's open, its payer,
+  and its treasury. Operators MUST list only additional
+  programs whose instructions they have reviewed. An
+  accepted program that can move value out of an account
+  passed to it is safe only because the next invariant
+  keeps the sponsor's account out of its reach.
+
+Fee-payer isolation
+: The sponsor's key appears in the transaction only as fee
+  payer. It is never an instruction account, so no
+  instruction at any depth can debit it, use it as an
+  authority, fund rent from it, or reassign it. The runtime
+  debits it only for the transaction fee.
+
+Bounded fee
+: The compute-unit limit and priority-fee caps bound the
+  transaction fee. With isolation, that fee is the sponsor's
+  entire exposure per transaction.
+
+Payment proven before sponsorship
+: Simulation with inner instructions MUST show the
+  challenged amount reaching the challenged recipient
+  before the sponsor signs, and post-confirmation
+  verification MUST confirm that it landed. A sponsor
+  therefore pays a bounded fee only for a transaction that
+  pays it the challenged amount, and a transaction that
+  fails simulation costs nothing. Servers SHOULD price
+  charges so that the challenged amount exceeds the maximum
+  sponsored fee.
+
+These invariants bound the sponsor's loss; they do not
+prevent a client from packing additional work into an
+accepted program at the sponsor's expense — for example a
+channel `distribute` that also pays the client's own
+co-recipients in the same instruction that pays the
+merchant. The sponsor still receives the challenged amount
+and still pays no more than the capped fee, so the client
+is buying that side effect at the challenged price. The
+pricing rule above is what makes this acceptable; servers
+whose charges are priced below the sponsored fee cap
+SHOULD disable fee sponsorship rather than composition.
+Composed transactions with client-paid fees expose no
+sponsor at all.
+
+Composed transactions widen the compute footprint a sponsor
+pays for; the compute-budget caps of
+{{transaction-verification}} and per-client rate limiting
+remain the controls. Listing a program also
+means trusting its upgrade authority: a program upgraded to
+misbehave cannot harm the isolated fee payer, but it can
+stop paying the merchant, which simulation detects before
+any fee is spent.
 
 ## Blockhash Freshness
 
@@ -2154,6 +2436,48 @@ The client builds a transaction with two transfers: 1,000,000
 base units to the primary recipient and 50,000 to the platform.
 The total paid remains 1,050,000 base units, matching the
 top-level `amount`.
+
+## Composed Charge Funded by a Payment Channel
+
+A 0.25 USDC charge paid from a payment channel
+({{I-D.solana-session}}) whose committed payee is the
+merchant. The challenge is an ordinary USDC charge; the
+Ed25519 program and the channel program are in the default
+composed set, so nothing is advertised.
+
+Decoded `request`:
+
+~~~json
+{
+  "amount": "250000",
+  "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "recipient": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  "description": "Inference request",
+  "methodDetails": {
+    "network": "mainnet",
+    "decimals": 6,
+    "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  }
+}
+~~~
+
+The client builds a transaction with three top-level
+instructions: an Ed25519 verification of the channel voucher
+signed by the channel's authorized signer, the channel
+program's `settle`, and its `distribute`. Executing
+`distribute` emits an inner `transferChecked` of 250,000 base
+units from the channel escrow to the merchant's associated
+token account. The credential is an ordinary
+`type="transaction"` payload.
+
+The server classifies the transaction as composed because
+its top-level programs include two default-composed-set
+programs, checks
+that its fee payer appears in no instruction, simulates with
+inner instructions, finds the 250,000-unit transfer to the
+merchant's ATA among them, broadcasts, and re-verifies the
+inner transfer in the confirmed transaction. The receipt is
+unchanged.
 
 ## Confidential Charge (Bundle)
 
