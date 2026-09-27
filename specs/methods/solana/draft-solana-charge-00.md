@@ -1380,7 +1380,11 @@ composed transaction the server MUST:
    {{split-recipient-ata-creation}} permits, and a
    top-level System Program or token instruction is
    permitted only as a required payment leg matched in
-   step 6.
+   step 6. Because step 3 keeps the sponsor out of every
+   instruction, a sponsored composed transaction cannot
+   carry sponsor-funded ATA creation: a challenge whose
+   `splits` set `ataCreationRequired` cannot be paid with
+   a composed transaction when `feePayer` is `true`.
 5. Simulate the transaction with `simulateTransaction`,
    requesting inner instructions (`innerInstructions:
    true`), regardless of `feePayer`. The server MUST
