@@ -348,7 +348,7 @@ MUST implement.
 
 `methodDetails.channelVersion` selects the channel ABI profile, not
 the Solana transaction message version. An absent field or integer `1`
-selects the legacy V1 profile. Integer `2` explicitly selects V2.
+selects the V1 profile. Integer `2` explicitly selects V2.
 Implementations MUST reject malformed or unsupported versions and
 MUST NOT retry a rejected V2 credential as V1. Ignoring unknown
 extension fields does not permit ignoring an unsupported value of
@@ -363,7 +363,7 @@ ABI. Persisted channel records and recovery workers MUST retain this
 binding; they MUST NOT reinterpret an existing channel under a newer
 profile.
 
-The legacy V1 program is
+The V1 program is
 `CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX`.
 The experimental V2 devnet program is
 `CHNLxBtXw7VPqd5GMcbtVoEbn4ehyaSoiHj56Ao5sWkJ`.
@@ -372,7 +372,7 @@ or support on any other network. Absent-version challenges MUST NOT
 select this V2 program. Unhooked V1 channels retain their existing
 behavior and encoding.
 
-V1 emitters SHOULD omit `channelVersion` to preserve legacy wire
+V1 emitters SHOULD omit `channelVersion` to preserve existing wire
 output. V1 challenges and credentials MUST NOT carry V2 hook
 configuration. A receiver MUST reject hook configuration paired with
 an absent or V1 channel version; it MUST NOT ignore that configuration
@@ -415,7 +415,7 @@ Once configured, a hook is mandatory. Every eligible operation MUST
 invoke it, including terminal distribution with zero payer refund.
 Invalid, duplicate and no-work operations MUST fail before callbacks.
 Missing configuration or required accounts MUST fail, not disable
-hooks. No legacy instruction or caller-selected flag may bypass them.
+hooks. No instruction or caller-selected flag may bypass them.
 
 Each descriptor MUST bind its target program, versioned entrypoint,
 ordered accounts or deterministic derivations, exact permissions and

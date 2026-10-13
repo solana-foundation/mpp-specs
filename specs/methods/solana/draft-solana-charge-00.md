@@ -207,7 +207,7 @@ supported channel credential and verification procedure. A direct
 transfer validator MUST NOT treat a channel deposit as payment to the
 merchant or infer channel support from a successful token transfer.
 An unsupported channel profile MUST be rejected, not silently
-downgraded to a direct transfer or a legacy channel.
+downgraded to a direct transfer or a V1 channel.
 
 Channel ABI selection is independent of `transactionVersions`,
 which selects Solana transaction message encodings. V1 and V2
