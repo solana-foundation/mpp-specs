@@ -2275,9 +2275,14 @@ bearer proof.
    use the challenged `recentBlockhash` and does
    not include unrelated writable accounts or
    instructions that could redirect funds or mutate
-   channel parameters, and that the server fee payer is
-   never used as an authority, source, or writable
-   account by any instruction. The server SHOULD reject
+   channel parameters. The server fee payer MAY occupy
+   the validated `rentPayer` role. It MAY also occupy the
+   `payee` role when it equals the challenged recipient. These
+   roles do not authorize unrelated transfers or extra
+   writable accounts. The server MUST bound its approved
+   transaction fees and rent funding, reject any other
+   use of its signing authority, and ensure V2 callbacks
+   do not inherit that authority. The server SHOULD reject
    transactions that route value through unexpected
    external programs.
 10. Verify the decoded `deposit` equals
