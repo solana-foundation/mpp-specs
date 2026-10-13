@@ -365,9 +365,9 @@ profile.
 
 The legacy V1 program is
 `CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX`.
-The planned V2 devnet program is
+The experimental V2 devnet program is
 `CHNLxBtXw7VPqd5GMcbtVoEbn4ehyaSoiHj56Ao5sWkJ`.
-The latter address is not evidence of deployment, an audited program,
+Its devnet deployment does not establish an audited program
 or support on any other network. Absent-version challenges MUST NOT
 select this V2 program. Unhooked V1 channels retain their existing
 behavior and encoding.
@@ -629,9 +629,10 @@ neither authorizes restoring payer credits.
 
 ### Deployment Status
 
-The V2 devnet address is planned. A deployment must configure a
-valid treasury owner before use. Localnet artifact integration does
-not establish devnet availability or an issuer's CPI compatibility.
+An experimental implementation was deployed to the V2 devnet address
+at slot 510665656 using SBF v3. Implementations MUST verify the current
+deployment and configured treasury before use. Program deployment
+does not establish an issuer's CPI compatibility.
 
 ## Channel State
 
