@@ -43,6 +43,14 @@ normative:
     date: 2026-01
 
 informative:
+  I-D.solana-session:
+    title: "Solana Session Intent for HTTP Payment Authentication"
+    target: https://datatracker.ietf.org/doc/draft-solana-session/
+    author:
+      - name: Ludo Galabru
+      - name: Jo Desormeaux
+      - name: Michael Assaf
+    date: 2026
   SOLANA-DOCS:
     title: "Solana Documentation"
     target: https://solana.com/docs
@@ -189,6 +197,27 @@ This document inherits the shared request semantics of the
 "charge" intent from {{I-D.payment-intent-charge}}. It defines
 only the Solana-specific `methodDetails`, `payload`, and
 verification procedures for the "solana" payment method.
+
+## Proposed Channel-Backed Charge
+
+A channel-backed charge is a proposed opt-in Solana method profile,
+not a change to direct-transfer charge semantics. It requires an
+explicit `channelProgram` and `channelVersion` selection and a
+supported channel credential and verification procedure. A direct
+transfer validator MUST NOT treat a channel deposit as payment to the
+merchant or infer channel support from a successful token transfer.
+An unsupported channel profile MUST be rejected, not silently
+downgraded to a direct transfer or a legacy channel.
+
+Channel ABI selection is independent of `transactionVersions`,
+which selects Solana transaction message encodings. V1 and V2
+channel coexistence and lifecycle policy are described in
+{{I-D.solana-session}}. Channel-backed charge requires corresponding
+builders, validators, authentication, settlement and replay binding;
+it is not implemented merely by adding channel lifecycle hooks.
+This document does not yet define that credential schema or advertise
+channel-backed charge as available. Direct-transfer charge wire
+formats and x402 wire formats are unchanged.
 
 # Requirements Language
 

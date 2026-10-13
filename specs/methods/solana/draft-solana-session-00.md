@@ -344,6 +344,295 @@ enforces settlement rules. This section defines the
 logical interface that conforming channel programs
 MUST implement.
 
+## Versioned Channel Profiles {#channel-profiles}
+
+`methodDetails.channelVersion` selects the channel ABI profile, not
+the Solana transaction message version. An absent field or integer `1`
+selects the legacy V1 profile. Integer `2` explicitly selects V2.
+Implementations MUST reject malformed or unsupported versions and
+MUST NOT retry a rejected V2 credential as V1. Ignoring unknown
+extension fields does not permit ignoring an unsupported value of
+this defined field.
+
+Clients and servers MUST bind the selected network, channel version,
+`channelProgram`, and supported state, instruction, voucher and hook
+ABIs as one configured tuple. They MUST verify account ownership and
+layout against that tuple before signing, sponsoring, resuming or
+accepting a payment. A program address alone does not negotiate an
+ABI. Persisted channel records and recovery workers MUST retain this
+binding; they MUST NOT reinterpret an existing channel under a newer
+profile.
+
+The legacy V1 program is
+`CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX`.
+The planned V2 devnet program is
+`CHNLxBtXw7VPqd5GMcbtVoEbn4ehyaSoiHj56Ao5sWkJ`.
+The latter address is not evidence of deployment, an audited program,
+or support on any other network. Absent-version challenges MUST NOT
+select this V2 program. Unhooked V1 channels retain their existing
+behavior and encoding.
+
+V1 emitters SHOULD omit `channelVersion` to preserve legacy wire
+output. V1 challenges and credentials MUST NOT carry V2 hook
+configuration. A receiver MUST reject hook configuration paired with
+an absent or V1 channel version; it MUST NOT ignore that configuration
+and fund an unhooked channel instead.
+
+V2 lifecycle hooks below specify a proposed opt-in extension.
+The V1 layouts and encodings in this document MUST NOT be reused for
+V2 without an explicit ABI definition. Advertising V2 requires a
+supported deployment and matching builders, validators, simulation
+and recovery paths. The draft ABI in {{v2-channel-abi}} does not
+establish deployment or issuer-integration availability.
+
+Unless explicitly identified as V2, the state layouts, instruction
+accounts, voucher encodings and authentication rules below describe
+V1. V2 support MUST NOT be inferred from those V1 definitions.
+
+## V2 Lifecycle Hooks {#lifecycle-hooks}
+
+The following requirements apply to the proposed V2 hook profile.
+Hooks are synchronous cross-program invocations (CPIs) made inside
+the channel instruction, not HTTP callbacks or separate transactions.
+Each of four optional slots is committed when opening the channel:
+
+* `preFund`: after validation and canonical account preparation,
+  before the funding transfer.
+* `postFund`: after the funding transfer and accounting update.
+* `preDistribute`: after validating an eligible payout or refund,
+  before token transfers.
+* `postDistribute`: after token transfers and accounting updates,
+  before terminal escrow or channel cleanup.
+
+`open` and `topUp` MUST enforce the same funding pair.
+`distribute` and `withdrawPayer` MUST enforce the same distribution
+pair, with the actual operation identified in callback context.
+`settle`, `settleAndSeal`, `requestClose`, `seal` and `reclaim`
+do not trigger these hooks. Direct donations to escrow do not invoke
+hooks and MUST NOT become credited principal.
+
+Once configured, a hook is mandatory. Every eligible operation MUST
+invoke it, including terminal distribution with zero payer refund.
+Invalid, duplicate and no-work operations MUST fail before callbacks.
+Missing configuration or required accounts MUST fail, not disable
+hooks. No legacy instruction or caller-selected flag may bypass them.
+
+Each descriptor MUST bind its target program, versioned entrypoint,
+ordered accounts or deterministic derivations, exact permissions and
+bounded static context. Configuration and required account preimages
+MUST be publicly recoverable so permissionless distribution does not
+depend on a disappearing operator. Recipient accounts and each hook's
+accounts MUST have an unambiguous partition. Payer and sponsor MUST
+approve configuration at opening; merchants MUST accept its policy
+before providing service.
+
+The channel program MUST construct typed callback context binding the
+channel incarnation, configuration, phase, actual operation and unique
+invocation identity. Pre hooks describe planned effects; post hooks
+describe executed transfers and accounting. Refund entitlement and
+actual principal transferred to the payer MUST be distinct. Treasury
+redirection, dust, donations and rent MUST NOT be reported as refunded
+credit principal. An earlier payer withdrawal MUST NOT be credited
+again by a later distribution. Failed transactions MUST roll back
+invocation progress.
+
+Callback authority MUST use a dedicated PDA scoped to the channel
+incarnation, configuration, phase and target program. The escrow
+authority MUST NOT be forwarded as a signer. CPI account permissions
+MUST come from the committed configuration, not inherited transaction
+flags. Payer or sponsor signing privileges MUST NOT be implicitly
+forwarded; permissionless distribution MUST NOT require their fresh
+signatures. Because signer privilege can propagate through nested
+CPIs, adapters MUST validate the scoped authority, bound context and
+replay identity rather than treating a signer as proof of the
+immediate caller.
+
+All mutating entrypoints MUST enforce an initializing/in-progress
+guard through post-hook validation and cleanup. The program MUST
+revalidate affected accounts after callbacks. A positive hooked payer
+refund MUST fail if its canonical refund account is unusable; it MUST
+NOT redirect that backing to treasury.
+
+Any hook error, malformed account list or compute/depth exhaustion
+MUST fail the enclosing transaction. Its instruction effects,
+including merchant transfers and issuer updates, roll back; transaction
+fees remain charged. Hooks MUST NOT run on a best-effort basis.
+Implementations MUST bound account counts and context sizes and
+validate the complete nested CPI stack against transaction limits.
+
+### Issuer Payer and Consumer Authentication
+
+The on-chain payer can be an issuer while the consumer uses a
+separately authorized voucher-signing key. An issuer-funded deposit
+does not authenticate the consumer to the merchant. Servers MUST
+verify consumer authorization bound to the challenge, channel and
+authorized signer. The V1 bearer proof in {{session-bearer-proof}}
+is signed by the payer; an issuer signature MUST NOT be treated as
+the consumer's signature. An issuer-payer flow requires a separately
+defined and supported consumer-authentication binding before it can
+be advertised as consumer-authenticated. In operator-signer mode, an
+issuer MAY confidentially provision its valid payer-signed bearer
+proof to a consumer as a channel-use capability. That is delegated
+bearer access, not proof of consumer identity, and does not authorize
+the consumer to sign vouchers as the issuer. Without such valid
+provisioning or a supported consumer-binding profile, distinct-payer
+consumer access is unavailable. This proposal does not change the
+V1 proof schema.
+Funding authorization MUST
+bind the issuer credit account, amount, channel terms and exact
+voucher-signing key; possession of a session proof alone MUST NOT
+authorize redemption from an unrelated issuer account.
+
+An issuer adapter can redeem approved credits in `preFund` and restore
+credits in `postDistribute` only for principal actually returned in
+that invocation. Zero refund MUST NOT issue positive credits.
+Restoration MUST require the issuer's actual update to succeed and
+MUST NOT leave the same backing freely spendable as customer USDC.
+Callback authority does not own the payer's token account; any debit
+requires explicit spending authority or approved custody.
+
+This requires an issuer-supported CPI and authority interface. Hooks
+cannot make a top-level-only issuer instruction CPI-compatible or
+manufacture issuer authorization. No Coinflow endpoint or binary
+interface is specified here.
+
+### Hook Availability
+
+A paused, broken or incompatibly upgraded hook can block funding,
+merchant payouts and refunds. Payer, sponsor and merchant MUST accept
+that availability dependency and the hook program's upgrade-authority
+trust before opening or serving the channel. Recovery workers MUST
+supply committed hook accounts and use the selected ABI; bypassing a
+failed hook is not a recovery mechanism.
+
+## V2 Channel ABI {#v2-channel-abi}
+
+The V2 program uses the existing instruction discriminators and
+channel PDA seed components under its separate program ID.
+Implementations MUST NOT select V2 by changing an account's version
+byte or infer ABI compatibility from a shared instruction
+discriminator.
+
+### Account Extension
+
+The V2 channel account is 1121 bytes. Its first 256 bytes retain the
+V1 field layout, with account-layout version `2`. The following
+extension uses zero-based byte offsets and exclusive end offsets:
+
+| Byte range | Encoding | Meaning |
+|------------|----------|---------|
+| 256..257 | u8 | In-progress guard |
+| 257..265 | u64 little-endian | Operation sequence |
+| 265..297 | 32 bytes | Hook configuration hash |
+| 297..1121 | Four 206-byte descriptors | Slot configuration |
+
+Slot order is `preFund`, `postFund`, `preDistribute`,
+`postDistribute`. Each fixed descriptor contains, in order:
+
+1. Target program public key (32 bytes).
+2. Callback entrypoint (8 bytes).
+3. Extra-account count (u8, at most 4).
+4. Static-data length (u8, at most 32).
+5. Static data, zero-padded to 32 bytes.
+6. Four extra-account entries, each an address (32 bytes) followed
+   by a writable flag (u8, `0` or `1`).
+
+Unused entries MUST be zero-padded. A disabled descriptor is entirely
+zero. The configuration hash is SHA-256 over the fixed 824 descriptor
+bytes, including padding, in slot order.
+
+### Instruction and Callback Accounts
+
+V2 `open` appends a compact configuration to its instruction data.
+For each slot in order, encode an enabled byte (`0` or `1`). A
+disabled slot has no following descriptor bytes. An enabled slot
+encodes the program key, entrypoint, extra-account count, static-data
+length, actual static-data bytes, and exactly that many 33-byte
+extra-account entries. Counts and lengths have the same bounds as
+the fixed descriptor representation.
+
+For the operation's active hook pair, the instruction account tail
+contains each enabled slot's target program, callback authority and
+ordered extra accounts. This tail follows the instruction's existing
+accounts, including distribution recipients where applicable.
+Disabled slots contribute no account bundle.
+
+The callback authority is the PDA under the V2 channel program with
+these ordered seeds:
+
+1. UTF-8 bytes of `channel_hook`.
+2. Channel public key (32 bytes).
+3. Configuration hash (32 bytes).
+4. Hook phase (one byte).
+5. Target program public key (32 bytes).
+
+Each callback receives a read-only signing authority, a read-only
+channel account, then its exact configured extra accounts. Extra
+accounts are not signers; their writable flags come from the
+descriptor. The callback data begins with the 8-byte entrypoint,
+followed by the program's typed Borsh callback context, then the
+static-data length (u8) and actual static-data bytes.
+
+### Callback Context Encoding
+
+The fixed Borsh context has the following field order. Integer
+values use little-endian encoding; `[32]` denotes 32 raw bytes.
+These names identify binary fields, not JSON properties.
+
+~~~text
+abi_version: u8
+phase: u8
+operation: u8
+executed: u8
+channel: [32]
+sequence: u64
+open_slot: u64
+payer: [32]
+payee: [32]
+mint: [32]
+token_program: [32]
+configuration: [32]
+authorized_signer: [32]
+distribution_hash: [32]
+deposit_before: u64
+settled_before: u64
+payout_before: u64
+withdrawn_before: i64
+funding_requested: u64
+merchant_due: u64
+refund_due: u64
+funding_transferred: u64
+merchant_transferred: u64
+refund_transferred_to_payer: u64
+redirected_principal: u64
+treasury_surplus: u64
+deposit_after: u64
+payout_after: u64
+withdrawn_after: i64
+refund_destination: [32]
+~~~
+
+`abi_version` is `1`; this callback ABI version is distinct from
+channel version `2`. Phase codes are `0` for `preFund`, `1` for
+`postFund`, `2` for `preDistribute`, and `3` for `postDistribute`.
+Operation codes match instruction discriminators: `1` for `open`,
+`3` for `topUp`, `7` for `distribute`, and `8` for `withdrawPayer`.
+`executed` is `0` for pre hooks and `1` for post hooks.
+
+`configuration` is the descriptor hash. Pre hooks receive zero
+executed-transfer fields and initialize the after-accounting fields
+to their corresponding pre-operation values. Post hooks receive
+actual results. `refund_destination` identifies the canonical payer
+ATA even when the actual refund is zero. Redirected principal and
+treasury surplus are separate from `refund_transferred_to_payer`;
+neither authorizes restoring payer credits.
+
+### Deployment Status
+
+The V2 devnet address is planned. A deployment must configure a
+valid treasury owner before use. Localnet artifact integration does
+not establish devnet availability or an issuer's CPI compatibility.
+
 ## Channel State
 
 Each channel is represented by an on-chain account
@@ -977,6 +1266,26 @@ externalId
   audit correlation.
 
 ## Method Details
+
+channelVersion
+: OPTIONAL. Integer channel ABI profile selector. Absent or `1`
+  selects V1; `2` explicitly opts into V2 as described in
+  {{channel-profiles}}. Unsupported or malformed values MUST be
+  rejected. This is independent of `transactionVersions`.
+
+channelHooks
+: OPTIONAL. V2-only hook configuration object. The optional keys
+  `preFund`, `postFund`, `preDistribute` and `postDistribute` each
+  contain one descriptor. An omitted slot is disabled. A descriptor
+  contains `programId` (base58 public key), `entrypoint` (array of
+  exactly eight byte integers), `accounts` (ordered array of at most
+  four objects with `address`, a base58 public key, and `writable`,
+  a boolean), and `staticData` (array of at most 32 byte integers).
+  Each byte integer MUST be in the inclusive range 0 through 255.
+  This object MUST NOT be present unless `channelVersion` is `2`.
+  Clients and servers MUST bind the opening transaction to this
+  configuration and verify any resumed channel's committed
+  configuration against the selected policy. See {{v2-channel-abi}}.
 
 network
 : REQUIRED. Solana cluster identifier. MUST be one of
