@@ -42,6 +42,18 @@ normative:
       - name: Jake Moxey
     date: 2026-01
 
+  I-D.solana-session:
+    title: "Solana Session Intent for HTTP Payment Authentication"
+    target: https://datatracker.ietf.org/doc/draft-solana-session/
+    author:
+      - name: Ludo Galabru
+      - name: Jo Desormeaux
+      - name: Michael Assaf
+    date: 2026
+  SIMD-0385:
+    title: "SIMD-0385: Transaction V1 Format"
+    target: https://github.com/solana-foundation/solana-improvement-documents/blob/main/proposals/0385-transaction-v1.md
+
 informative:
   SOLANA-DOCS:
     title: "Solana Documentation"
@@ -73,9 +85,11 @@ informative:
 
 This document defines the "charge" intent for the "solana" payment
 method within the Payment HTTP Authentication Scheme
-{{I-D.httpauth-payment}}. The client constructs and signs a native SOL
-or SPL token transfer on the Solana blockchain; the server verifies the
-payment and presents the transaction signature as proof of payment.
+{{I-D.httpauth-payment}}. The client constructs and signs a transaction
+that pays native SOL or SPL tokens on the Solana blockchain, either
+directly or through an explicitly selected payment-channel profile.
+The server verifies the payment and presents the transaction signature
+as proof of payment.
 
 Two credential types are supported: `type="transaction"` (default),
 where the client sends the signed transaction to the server for
@@ -189,6 +203,187 @@ This document inherits the shared request semantics of the
 "charge" intent from {{I-D.payment-intent-charge}}. It defines
 only the Solana-specific `methodDetails`, `payload`, and
 verification procedures for the "solana" payment method.
+
+## Channel-Backed Charge {#channel-backed-charge}
+
+The optional `methodDetails.channelCharge` object selects an atomic,
+V2 channel-backed charge instead of a direct transfer. Its absence
+retains the direct-transfer profile unchanged. Channel ABI selection
+is independent of `transactionVersions`, which selects the Solana
+transaction message encoding. A receiver MUST reject an unsupported
+channel profile and MUST NOT downgrade it to a direct transfer, V1
+channel, or channel with different hooks.
+
+The rules in this section replace direct-transfer construction and
+instruction verification only when `channelCharge` is present.
+Challenge authentication, expiry, payment confirmation, receipts,
+and replay prevention continue to apply. A channel deposit alone
+MUST NOT be accepted as payment to the merchant.
+
+### Request Profile
+
+`channelCharge` MUST contain the following fields:
+
+- `channelProgram`: Base58-encoded V2 channel program address.
+  Clients and servers MUST match it to their explicitly configured
+  program for the requested network.
+- `channelVersion`: Integer `2`.
+- `channelHooks`: Hook configuration object. An empty object disables
+  all slots. The optional slots `preFund`, `postFund`,
+  `preDistribute`, and `postDistribute` each contain a descriptor.
+  A descriptor contains `programId` (base58 public key),
+  `entrypoint` (exactly eight byte integers), `accounts` (an ordered
+  array of at most four objects containing `address`, a base58
+  public key, and `writable`, a boolean), and `staticData` (at most
+  32 byte integers). Byte integers range from 0 through 255.
+- `recentSlot`: JSON integer in the unsigned 64-bit range, identifying
+  the network slot used as the channel's opening slot.
+
+Unknown fields inside `channelCharge` MUST be rejected.
+
+The profile reuses `amount`, `currency`, `recipient`, `splits`,
+`network`, `tokenProgram`, `feePayer`, `feePayerKey`, and
+`recentBlockhash`; it does not add payer, voucher-key, or salt
+challenge fields. The initial challenge need not know the payer's
+identity. The client chooses those channel values and authenticates
+them in the signed opening transaction.
+
+This profile supports only the original SPL Token program.
+`network`, `tokenProgram`, and `recentBlockhash` MUST be explicit.
+For this profile, `methodDetails.transactionVersions` is an optional,
+nonempty array of supported message versions drawn from `0` and `1`.
+Its absence means `[0]`. Version `1` uses {{SIMD-0385}} and MUST NOT
+be advertised unless the corresponding feature is active on `network`.
+Clients MUST select a version supported by both the challenge and
+their signer. Servers MUST reject unadvertised message versions,
+unversioned messages, and address lookup tables. The serialized
+transaction limit is 1232 bytes for version `0` and 4096 bytes for
+version `1`. Version `1` carries its compute configuration in the
+message header; it MUST NOT contain Compute Budget instructions.
+Native SOL, Token-2022, and confidential transfers are not supported.
+An `externalId`, when present, is bound through the authenticated
+challenge and its challenge-ID memo, not a separate memo instruction.
+The existing direct-transfer profile retains its asset and
+transaction-version support.
+
+The existing split semantics are unchanged: `amount` is the total
+payment, and the primary recipient receives that total minus all
+split amounts. The channel deposit and final voucher amount MUST
+equal `amount`. Every distribution output MUST equal its required
+payment leg exactly. Implementations MUST reject amounts that cannot
+be represented exactly by the channel's integer basis-point shares;
+rounding, dust, and overpayment MUST NOT substitute for exact output
+verification.
+
+When `feePayer` is `true`, the channel payee/operator and transaction
+fee payer are `feePayerKey`. This operator MAY differ from the
+merchant `recipient`; that difference grants no economic share.
+The distribution MUST explicitly assign the full payment to the
+merchant and split recipients. Without sponsorship, the channel
+payee is the merchant recipient, and the server MUST have that
+recipient's configured signer to co-sign settlement. The client
+payer pays transaction fees and rent in that case. All token accounts
+used by this profile, except the channel escrow created by opening,
+MUST already exist as their canonical associated token accounts.
+
+### Atomic Credential
+
+The credential uses the existing `type="transaction"` payload and
+base64-encoded serialized transaction bytes. Push-mode signature
+credentials are not supported for this profile. The transaction
+MUST fit its version's serialized limit: 1232 bytes for version `0`
+or 4096 bytes for version `1`. Clients MUST check this limit before
+requesting signatures and MUST reject a transaction that cannot fit
+a mutually supported version. Hook configuration does not authorize
+relaxing the size limit or using address lookup tables.
+The transaction MUST contain exactly these five instructions,
+in this order:
+
+1. V2 `open`, with deposit equal to `amount`, opening slot equal to
+   `recentSlot`, grace period one second, and the selected hook
+   configuration.
+2. Ed25519 verification of the final voucher, using the voucher key
+   committed by `open`.
+3. `settleAndSeal`, with the voucher present and the channel payee
+   as signer.
+4. V2 `distribute`, paying the exact primary and split amounts.
+5. A Memo Program instruction whose UTF-8 data is exactly
+   `mpp-charge:` followed by the challenge `id`.
+
+The voucher bytes are the existing ABI prefix `[0x56, 0x01]`,
+followed by the 32-byte channel PDA, unsigned 64-bit amount, and
+signed 64-bit expiry, with both integers encoded little-endian.
+The amount MUST equal the full payment amount, and expiry is the
+challenge expiry expressed in Unix seconds. The channel PDA binds
+the selected program indirectly through its derivation; the voucher
+does not add a program ID or opening-slot field. The signed opening
+transaction binds the exact program and opening slot. The transaction
+MUST use the challenged recent blockhash. The treasury MUST be the
+canonical treasury for the configured network.
+
+No extra transfer, ATA-creation, compute-budget, memo, or
+caller-selected hook instruction is permitted. Hook invocations
+are CPIs inside the channel instructions, not extra top-level
+instructions or HTTP callbacks.
+
+### Verification and Failure Semantics
+
+Before co-signing or broadcasting, the server MUST authenticate the
+challenge and check its expiry and protection space. It MUST decode
+the client-selected payer, voucher key, and salt from `open`,
+reconstruct the complete canonical transaction from the challenge
+and those values, and compare the complete message. Current route
+policy comparisons MUST preserve the original authenticated
+challenge's `recentSlot` and `recentBlockhash`, not replace them
+with freshly generated values. Verification
+MUST cover instruction order and data, account order, signer and
+writable privileges, derived channel and token accounts, hook
+descriptors and account tails, voucher bytes, fee payer, blockhash,
+distribution, treasury, and challenge-bound memo. A program allowlist
+or inspection of token transfers alone is insufficient.
+
+The server MUST verify the voucher signature and every required
+client transaction signature. Only slots for explicitly configured
+server signers MAY be unsigned on receipt. It MUST NOT sign an
+arbitrary transaction merely because a configured program appears
+in it. A successful receipt requires successful confirmation of the
+entire atomic transaction, not merely a valid voucher or deposit.
+
+Canonical construction is not proof that the merchant was paid.
+Before adding any server signature, the server MUST simulate the
+exact transaction and verify every beneficiary's exact net token
+credit using `preTokenBalances` and `postTokenBalances` from that
+same execution. After confirmation, it MUST repeat this check using
+the confirmed transaction's `getTransaction` metadata before issuing
+a receipt. Missing balance metadata, failed execution, or a credit
+that differs from the challenged payment MUST cause rejection.
+Balances fetched separately before and after execution are not a
+substitute. In particular, a successful distribution that redirects
+an invalid or frozen recipient's payment to treasury MUST NOT be
+accepted as payment to that recipient.
+
+Clients and servers MUST match the program, version, and complete
+hook configuration against their explicitly selected policy before
+funding or co-signing. A client requiring credit protection MUST
+reject a direct-transfer or differently protected challenge rather
+than silently continuing. Credit-provider selection is local SDK
+or application policy, not an additional public MPP request field.
+This profile defines no provider-specific credit or burn ABI.
+
+V2 hook execution follows the lifecycle and callback authority
+rules described in {{I-D.solana-session}}. Enabled hooks are
+mandatory. Any callback error, malformed callback accounts, or
+compute/depth exhaustion MUST fail the transaction and roll back
+opening, settlement, distribution, and hook effects atomically;
+network transaction fees can still be charged. Implementations
+MUST NOT retry a failed protected charge with hooks removed.
+
+The memo binds the payment to one authenticated challenge. Servers
+MUST enforce the existing replay rules across challenges and
+protection spaces, including after hook or broadcast failures.
+Retries MUST NOT create a second payment for an already confirmed
+charge. A failed or unconfirmed atomic transaction MUST NOT produce
+a successful payment receipt.
 
 # Requirements Language
 
