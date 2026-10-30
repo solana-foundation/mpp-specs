@@ -82,7 +82,22 @@ SESSION_PROBLEMS = [
      "spec_label": "draft-tempo-session"},
 ]
 
-ALL_PROBLEMS = CORE_PROBLEMS + SESSION_PROBLEMS
+ATTESTATION_PROBLEMS = [
+    {"slug": "attestation-required", "title": "Attestation Required", "http_status": 402,
+     "description": "The challenge requires attestations about the payer, and none, or not enough, were presented.",
+     "spec_label": "draft-payment-attestation"},
+    {"slug": "attestation-invalid", "title": "Attestation Invalid", "http_status": 402,
+     "description": "A presented attestation failed verification, or its claims do not satisfy the challenge's query.",
+     "spec_label": "draft-payment-attestation"},
+    {"slug": "issuer-untrusted", "title": "Issuer Untrusted", "http_status": 402,
+     "description": "A presented attestation comes from an issuer the challenge does not list as trusted.",
+     "spec_label": "draft-payment-attestation"},
+    {"slug": "binding-mismatch", "title": "Binding Mismatch", "http_status": 402,
+     "description": "A presented attestation is bound to another challenge, realm or payer.",
+     "spec_label": "draft-payment-attestation"},
+]
+
+ALL_PROBLEMS = CORE_PROBLEMS + SESSION_PROBLEMS + ATTESTATION_PROBLEMS
 
 
 def make_example(slug, title, http_status):
