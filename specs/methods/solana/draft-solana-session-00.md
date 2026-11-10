@@ -365,12 +365,17 @@ profile.
 
 The V1 program is
 `CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX`.
-The experimental V2 devnet program is
+The experimental canary program is
 `CHNLxBtXw7VPqd5GMcbtVoEbn4ehyaSoiHj56Ao5sWkJ`.
-Its devnet deployment does not establish an audited program
-or support on any other network. Absent-version challenges MUST NOT
-select this V2 program. Unhooked V1 channels retain their existing
-behavior and encoding.
+Both run a dual-version runtime: each loads V1 and V2 channel
+accounts, and the canary build additionally provides the V2
+instruction family. The ABI version is selected by
+`channelVersion`, never by the program address: an absent or V1
+version selects V1 on either program, and implementations MUST NOT
+infer V2 from the program address. The canary's devnet deployment
+does not establish an audited program or support on any other
+network. Unhooked V1 channels retain their existing behavior and
+encoding.
 
 V1 emitters SHOULD omit `channelVersion` to preserve existing wire
 output. V1 challenges and credentials MUST NOT carry V2 hook
@@ -507,11 +512,17 @@ failed hook is not a recovery mechanism.
 
 ## V2 Channel ABI {#v2-channel-abi}
 
-The V2 program uses the existing instruction discriminators and
-channel PDA seed components under its separate program ID.
-Implementations MUST NOT select V2 by changing an account's version
-byte or infer ABI compatibility from a shared instruction
-discriminator.
+The four hooked operations have their own instruction
+discriminators: `openWithHooks` (10), `topUpWithHooks` (11),
+`distributeWithHooks` (12) and `withdrawPayerWithHooks` (13). The V1
+`open` (1), `topUp` (3), `distribute` (7) and `withdrawPayer` (8)
+MUST NOT operate on a V2 account, and the hooked instructions MUST
+NOT operate on a V1 account; a V2 account whose four slots are all
+disabled still uses the hooked family. `settle`, `settleAndSeal`,
+`requestClose`, `seal` and `reclaim` keep their discriminators,
+accept either account version and never invoke hooks. Channel PDA
+seed components are unchanged. Implementations MUST NOT select V2 by
+changing an account's version byte.
 
 ### Account Extension
 
@@ -543,7 +554,8 @@ bytes, including padding, in slot order.
 
 ### Instruction and Callback Accounts
 
-V2 `open` appends a compact configuration to its instruction data.
+`openWithHooks` appends a compact configuration to the V1 `open`
+instruction data.
 For each slot in order, encode an enabled byte (`0` or `1`). A
 disabled slot has no following descriptor bytes. An enabled slot
 encodes the program key, entrypoint, extra-account count, static-data
@@ -615,8 +627,10 @@ refund_destination: [32]
 `abi_version` is `1`; this callback ABI version is distinct from
 channel version `2`. Phase codes are `0` for `preFund`, `1` for
 `postFund`, `2` for `preDistribute`, and `3` for `postDistribute`.
-Operation codes match instruction discriminators: `1` for `open`,
-`3` for `topUp`, `7` for `distribute`, and `8` for `withdrawPayer`.
+Operation codes identify the economic operation, not the outer
+instruction: `1` for `open`, `3` for `topUp`, `7` for `distribute`,
+and `8` for `withdrawPayer`, also when the outer instruction is the
+hooked variant (10, 11, 12 or 13).
 `executed` is `0` for pre hooks and `1` for post hooks.
 
 `configuration` is the descriptor hash. Pre hooks receive zero
@@ -629,9 +643,13 @@ neither authorizes restoring payer credits.
 
 ### Deployment Status
 
-An experimental implementation was deployed to the V2 devnet address
-at slot 510665656 using SBF v3. Implementations MUST verify the current
-deployment and configured treasury before use. Program deployment
+The canary build was deployed to its devnet address at slot
+520762057 using SBF v3, from payment-channels commit `f186362`
+(executable SHA-256
+`731dfa219846dbcd1bdd11aefaf01fb25911d44706d34b713cd76097472e60a6`),
+with its IDL published through the Program Metadata program.
+Implementations MUST verify the current deployment and configured
+treasury before use. Program deployment
 does not establish an issuer's CPI compatibility.
 
 ## Channel State

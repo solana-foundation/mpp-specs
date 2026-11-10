@@ -299,14 +299,14 @@ relaxing the size limit or using address lookup tables.
 The transaction MUST contain exactly these five instructions,
 in this order:
 
-1. V2 `open`, with deposit equal to `amount`, opening slot equal to
+1. `openWithHooks` (V2), with deposit equal to `amount`, opening slot equal to
    `recentSlot`, grace period one second, and the selected hook
    configuration.
 2. Ed25519 verification of the final voucher, using the voucher key
    committed by `open`.
 3. `settleAndSeal`, with the voucher present and the channel payee
    as signer.
-4. V2 `distribute`, paying the exact primary and split amounts.
+4. `distributeWithHooks` (V2), paying the exact primary and split amounts.
 5. A Memo Program instruction whose UTF-8 data is exactly
    `mpp-charge:` followed by the challenge `id`.
 
